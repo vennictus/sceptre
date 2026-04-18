@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"fmt"
 	"sceptre/internal/btree"
 	"sceptre/internal/pager"
 )
@@ -12,8 +13,9 @@ type Options struct {
 
 // KV ties the B+ tree state to the durable pager file.
 type KV struct {
-	pager *pager.Pager
-	tree  *btree.Tree
+	pager      *pager.Pager
+	tree       *btree.Tree
+	commitHook commitHook
 }
 
 // Open opens the durable pager and reconstructs the in-memory B+ tree state.
@@ -60,22 +62,32 @@ func (kv *KV) Get(key []byte) ([]byte, bool, error) {
 
 // Set inserts or replaces a key/value pair and persists the updated tree.
 func (kv *KV) Set(key, value []byte) error {
+	previous := kv.tree.Snapshot()
+
 	if _, err := kv.tree.Delete(key); err != nil {
-		return err
+		return kv.rollback(previous, err)
 	}
 	if err := kv.tree.Insert(key, value); err != nil {
-		return err
+		return kv.rollback(previous, err)
 	}
-	return kv.persist()
+	return kv.persistCommitted(previous)
 }
 
 // Del removes a key if it exists and persists the updated tree.
 func (kv *KV) Del(key []byte) (bool, error) {
+	previous := kv.tree.Snapshot()
+
 	removed, err := kv.tree.Delete(key)
-	if err != nil || !removed {
-		return removed, err
+	if err != nil {
+		return false, kv.rollback(previous, err)
 	}
-	return true, kv.persist()
+	if !removed {
+		return false, nil
+	}
+	if err := kv.persistCommitted(previous); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func loadTree(p *pager.Pager) (*btree.Tree, error) {
@@ -103,12 +115,44 @@ func (kv *KV) persist() error {
 			return err
 		}
 	}
+	if err := kv.runCommitHook(commitStagePagesWritten); err != nil {
+		return err
+	}
 	if err := kv.pager.Sync(); err != nil {
+		return err
+	}
+	if err := kv.runCommitHook(commitStagePagesSynced); err != nil {
 		return err
 	}
 
 	meta := kv.pager.Meta()
 	meta.RootPage = snapshot.Root
 	meta.PageCount = snapshot.NextPage
-	return kv.pager.PublishMeta(meta)
+	if err := kv.pager.PublishMeta(meta); err != nil {
+		return err
+	}
+	return kv.runCommitHook(commitStageMetaPublished)
+}
+
+func (kv *KV) persistCommitted(previous btree.Snapshot) error {
+	if err := kv.persist(); err != nil {
+		return kv.rollback(previous, err)
+	}
+	return nil
+}
+
+func (kv *KV) rollback(previous btree.Snapshot, cause error) error {
+	restored, err := btree.NewTreeFromSnapshot(int(kv.pager.PageSize()), previous)
+	if err != nil {
+		return fmt.Errorf("%w: rollback failed: %v", cause, err)
+	}
+	kv.tree = restored
+	return cause
+}
+
+func (kv *KV) runCommitHook(stage commitStage) error {
+	if kv == nil || kv.commitHook == nil {
+		return nil
+	}
+	return kv.commitHook(stage)
 }
