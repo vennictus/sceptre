@@ -90,6 +90,105 @@ func TestKVDeleteMissingKeyIsStable(t *testing.T) {
 	assertKVValue(t, store, "missing", "", false)
 }
 
+func TestKVInterruptedSetMaintainsProcessView(t *testing.T) {
+	stages := []struct {
+		name      string
+		stage     commitStage
+		wantAlpha string
+	}{
+		{
+			name:      "pages_written",
+			stage:     commitStagePagesWritten,
+			wantAlpha: "one",
+		},
+		{
+			name:      "pages_synced",
+			stage:     commitStagePagesSynced,
+			wantAlpha: "one",
+		},
+		{
+			name:      "meta_published",
+			stage:     commitStageMetaPublished,
+			wantAlpha: "uno",
+		},
+	}
+
+	for _, tc := range stages {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "sceptre.db")
+			store := mustOpenKV(t, path)
+			defer store.Close()
+
+			if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+				t.Fatalf("Set(alpha=one) error = %v", err)
+			}
+			if err := store.Set([]byte("beta"), []byte("two")); err != nil {
+				t.Fatalf("Set(beta=two) error = %v", err)
+			}
+
+			store.commitHook = failAfterCommitStage(tc.stage)
+			err := store.Set([]byte("alpha"), []byte("uno"))
+			if !errors.Is(err, errCommitInterrupted) {
+				t.Fatalf("Set(alpha=uno) error = %v, want %v", err, errCommitInterrupted)
+			}
+
+			assertKVValue(t, store, "alpha", tc.wantAlpha, true)
+			assertKVValue(t, store, "beta", "two", true)
+		})
+	}
+}
+
+func TestKVInterruptedDeleteMaintainsProcessView(t *testing.T) {
+	stages := []struct {
+		name       string
+		stage      commitStage
+		wantBetaOK bool
+	}{
+		{
+			name:       "pages_written",
+			stage:      commitStagePagesWritten,
+			wantBetaOK: true,
+		},
+		{
+			name:       "pages_synced",
+			stage:      commitStagePagesSynced,
+			wantBetaOK: true,
+		},
+		{
+			name:       "meta_published",
+			stage:      commitStageMetaPublished,
+			wantBetaOK: false,
+		},
+	}
+
+	for _, tc := range stages {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "sceptre.db")
+			store := mustOpenKV(t, path)
+			defer store.Close()
+
+			if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+				t.Fatalf("Set(alpha=one) error = %v", err)
+			}
+			if err := store.Set([]byte("beta"), []byte("two")); err != nil {
+				t.Fatalf("Set(beta=two) error = %v", err)
+			}
+
+			store.commitHook = failAfterCommitStage(tc.stage)
+			removed, err := store.Del([]byte("beta"))
+			if !errors.Is(err, errCommitInterrupted) {
+				t.Fatalf("Del(beta) error = %v, want %v", err, errCommitInterrupted)
+			}
+			if removed {
+				t.Fatal("Del(beta) removed = true on interrupted commit, want false")
+			}
+
+			assertKVValue(t, store, "alpha", "one", true)
+			assertKVValue(t, store, "beta", "two", tc.wantBetaOK)
+		})
+	}
+}
+
 func TestKVRecoveryAcrossPartialCommitBoundaries(t *testing.T) {
 	stages := []struct {
 		name      string

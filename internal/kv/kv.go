@@ -173,6 +173,9 @@ func (kv *KV) persist() error {
 
 func (kv *KV) persistCommitted(previous btree.Snapshot) error {
 	if err := kv.persist(); err != nil {
+		if stage, ok := interruptedCommitStage(err); ok && stage == commitStageMetaPublished {
+			return err
+		}
 		return kv.rollback(previous, err)
 	}
 	return nil
