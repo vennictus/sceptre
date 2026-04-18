@@ -93,12 +93,10 @@ func (kv *KV) Del(key []byte) (bool, error) {
 func loadTree(p *pager.Pager) (*btree.Tree, error) {
 	meta := p.Meta()
 	pages := make(map[uint64][]byte)
-	for pageID := uint64(pager.MetaPageCount); pageID < meta.PageCount; pageID++ {
-		page, err := p.ReadPage(pageID)
-		if err != nil {
+	if meta.RootPage != 0 {
+		if err := loadReachablePages(p, meta.RootPage, pages); err != nil {
 			return nil, err
 		}
-		pages[pageID] = page
 	}
 
 	return btree.NewTreeFromSnapshot(int(meta.PageSize), btree.Snapshot{
@@ -108,9 +106,48 @@ func loadTree(p *pager.Pager) (*btree.Tree, error) {
 	})
 }
 
+func loadReachablePages(p *pager.Pager, pageID uint64, pages map[uint64][]byte) error {
+	if _, ok := pages[pageID]; ok {
+		return nil
+	}
+
+	page, err := p.ReadPage(pageID)
+	if err != nil {
+		return err
+	}
+	pages[pageID] = page
+
+	node, err := btree.WrapNode(page)
+	if err != nil {
+		return err
+	}
+	switch node.Type() {
+	case btree.NodeTypeLeaf:
+		return nil
+	case btree.NodeTypeInternal:
+		for i := 0; i < node.Count(); i++ {
+			cell, err := node.InternalCell(i)
+			if err != nil {
+				return err
+			}
+			if err := loadReachablePages(p, cell.Child, pages); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return btree.ErrUnknownNodeType
+	}
+}
+
 func (kv *KV) persist() error {
 	snapshot := kv.tree.Snapshot()
-	for pageID, page := range snapshot.Pages {
+	durable, err := snapshot.RemapPageIDs(kv.pager.Meta().PageCount)
+	if err != nil {
+		return err
+	}
+
+	for pageID, page := range durable.Pages {
 		if err := kv.pager.WritePage(pageID, page); err != nil {
 			return err
 		}
@@ -126,8 +163,8 @@ func (kv *KV) persist() error {
 	}
 
 	meta := kv.pager.Meta()
-	meta.RootPage = snapshot.Root
-	meta.PageCount = snapshot.NextPage
+	meta.RootPage = durable.Root
+	meta.PageCount = durable.NextPage
 	if err := kv.pager.PublishMeta(meta); err != nil {
 		return err
 	}
