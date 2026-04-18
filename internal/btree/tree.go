@@ -36,6 +36,13 @@ type splitResult struct {
 	MaxKey []byte
 }
 
+type deleteResult struct {
+	removed   bool
+	empty     bool
+	maxKey    []byte
+	underflow bool
+}
+
 // NewTree creates an empty in-memory tree with a fixed page size.
 func NewTree(pageSize int) (*Tree, error) {
 	switch {
@@ -101,6 +108,39 @@ func (t *Tree) Insert(key, value []byte) error {
 	return nil
 }
 
+// Delete removes a key if it exists.
+func (t *Tree) Delete(key []byte) (bool, error) {
+	if t.root == 0 {
+		return false, nil
+	}
+
+	result, err := t.deleteRecursive(t.root, key, true)
+	if err != nil || !result.removed {
+		return result.removed, err
+	}
+	if result.empty {
+		delete(t.pages, t.root)
+		t.root = 0
+		return true, nil
+	}
+
+	root, err := t.node(t.root)
+	if err != nil {
+		return false, err
+	}
+	if root.Type() == NodeTypeInternal && root.Count() == 1 {
+		entry, err := root.InternalCell(0)
+		if err != nil {
+			return false, err
+		}
+		oldRoot := t.root
+		t.root = entry.Child
+		delete(t.pages, oldRoot)
+	}
+
+	return true, nil
+}
+
 func (t *Tree) getFrom(pageID uint64, key []byte) ([]byte, bool, error) {
 	node, err := t.node(pageID)
 	if err != nil {
@@ -133,6 +173,22 @@ func (t *Tree) getFrom(pageID uint64, key []byte) ([]byte, bool, error) {
 	}
 }
 
+func (t *Tree) deleteRecursive(pageID uint64, key []byte, isRoot bool) (deleteResult, error) {
+	node, err := t.node(pageID)
+	if err != nil {
+		return deleteResult{}, err
+	}
+
+	switch node.Type() {
+	case NodeTypeLeaf:
+		return t.deleteFromLeaf(pageID, node, key, isRoot)
+	case NodeTypeInternal:
+		return t.deleteFromInternal(pageID, node, key, isRoot)
+	default:
+		return deleteResult{}, ErrUnknownNodeType
+	}
+}
+
 func (t *Tree) insertRecursive(pageID uint64, key, value []byte) ([]byte, *splitResult, error) {
 	node, err := t.node(pageID)
 	if err != nil {
@@ -147,6 +203,79 @@ func (t *Tree) insertRecursive(pageID uint64, key, value []byte) ([]byte, *split
 	default:
 		return nil, nil, ErrUnknownNodeType
 	}
+}
+
+func (t *Tree) deleteFromLeaf(pageID uint64, node Node, key []byte, isRoot bool) (deleteResult, error) {
+	entries, err := node.leafEntries()
+	if err != nil {
+		return deleteResult{}, err
+	}
+
+	index, found, err := node.Search(key)
+	if err != nil {
+		return deleteResult{}, err
+	}
+	if !found {
+		return leafDeleteResult(entries, false, isRoot, t.minNodeBytes()), nil
+	}
+
+	entries = removeLeafEntry(entries, index)
+	if len(entries) == 0 {
+		if _, err := NewNode(t.pages[pageID], NodeTypeLeaf); err != nil {
+			return deleteResult{}, err
+		}
+		return deleteResult{removed: true, empty: true}, nil
+	}
+
+	if _, err := buildLeafNode(t.pages[pageID], entries); err != nil {
+		return deleteResult{}, err
+	}
+	return leafDeleteResult(entries, true, isRoot, t.minNodeBytes()), nil
+}
+
+func (t *Tree) deleteFromInternal(pageID uint64, node Node, key []byte, isRoot bool) (deleteResult, error) {
+	entries, err := node.internalEntries()
+	if err != nil {
+		return deleteResult{}, err
+	}
+
+	childIndex, err := node.childIndexForKey(key)
+	if err != nil {
+		return deleteResult{}, err
+	}
+
+	childResult, err := t.deleteRecursive(entries[childIndex].Child, key, false)
+	if err != nil {
+		return deleteResult{}, err
+	}
+	if !childResult.removed {
+		return internalDeleteResult(entries, false, isRoot, t.minNodeBytes()), nil
+	}
+
+	if childResult.empty {
+		delete(t.pages, entries[childIndex].Child)
+		entries = removeInternalEntry(entries, childIndex)
+	} else {
+		entries[childIndex].Key = cloneBytes(childResult.maxKey)
+		if childResult.underflow && len(entries) > 1 {
+			entries, err = t.fixChildUnderflow(entries, childIndex)
+			if err != nil {
+				return deleteResult{}, err
+			}
+		}
+	}
+
+	if len(entries) == 0 {
+		if _, err := NewNode(t.pages[pageID], NodeTypeInternal); err != nil {
+			return deleteResult{}, err
+		}
+		return deleteResult{removed: true, empty: true}, nil
+	}
+
+	if _, err := buildInternalNode(t.pages[pageID], entries); err != nil {
+		return deleteResult{}, err
+	}
+	return internalDeleteResult(entries, true, isRoot, t.minNodeBytes()), nil
 }
 
 func (t *Tree) insertIntoLeaf(pageID uint64, node Node, key, value []byte) ([]byte, *splitResult, error) {
@@ -198,6 +327,124 @@ func (t *Tree) insertIntoLeaf(pageID uint64, node Node, key, value []byte) ([]by
 		PageID: rightID,
 		MaxKey: cloneBytes(rightEntries[len(rightEntries)-1].Key),
 	}, nil
+}
+
+func (t *Tree) fixChildUnderflow(entries []internalEntry, childIndex int) ([]internalEntry, error) {
+	if childIndex > 0 {
+		return t.rebalanceChildren(entries, childIndex-1, childIndex)
+	}
+	return t.rebalanceChildren(entries, childIndex, childIndex+1)
+}
+
+func (t *Tree) rebalanceChildren(entries []internalEntry, leftIndex, rightIndex int) ([]internalEntry, error) {
+	leftNode, err := t.node(entries[leftIndex].Child)
+	if err != nil {
+		return nil, err
+	}
+	rightNode, err := t.node(entries[rightIndex].Child)
+	if err != nil {
+		return nil, err
+	}
+	if leftNode.Type() != rightNode.Type() {
+		return nil, ErrNodeTypeMismatch
+	}
+
+	switch leftNode.Type() {
+	case NodeTypeLeaf:
+		leftEntries, err := leftNode.leafEntries()
+		if err != nil {
+			return nil, err
+		}
+		rightEntries, err := rightNode.leafEntries()
+		if err != nil {
+			return nil, err
+		}
+		return t.rebalanceLeafChildren(entries, leftIndex, rightIndex, leftEntries, rightEntries)
+	case NodeTypeInternal:
+		leftEntries, err := leftNode.internalEntries()
+		if err != nil {
+			return nil, err
+		}
+		rightEntries, err := rightNode.internalEntries()
+		if err != nil {
+			return nil, err
+		}
+		return t.rebalanceInternalChildren(entries, leftIndex, rightIndex, leftEntries, rightEntries)
+	default:
+		return nil, ErrUnknownNodeType
+	}
+}
+
+func (t *Tree) rebalanceLeafChildren(parent []internalEntry, leftIndex, rightIndex int, leftEntries, rightEntries []leafEntry) ([]internalEntry, error) {
+	combined := make([]leafEntry, 0, len(leftEntries)+len(rightEntries))
+	combined = append(combined, leftEntries...)
+	combined = append(combined, rightEntries...)
+
+	leftPageID := parent[leftIndex].Child
+	rightPageID := parent[rightIndex].Child
+	if leafEntriesSize(combined) <= t.pageSize {
+		if _, err := buildLeafNode(t.pages[leftPageID], combined); err != nil {
+			return nil, err
+		}
+		delete(t.pages, rightPageID)
+		parent[leftIndex].Key = cloneBytes(combined[len(combined)-1].Key)
+		return removeInternalEntry(parent, rightIndex), nil
+	}
+
+	splitIndex, err := chooseRebalanceSplit(len(combined), t.minNodeBytes(), t.pageSize, func(index int) (left, right int) {
+		return leafEntriesSize(combined[:index]), leafEntriesSize(combined[index:])
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	leftEntries = combined[:splitIndex]
+	rightEntries = combined[splitIndex:]
+	if _, err := buildLeafNode(t.pages[leftPageID], leftEntries); err != nil {
+		return nil, err
+	}
+	if _, err := buildLeafNode(t.pages[rightPageID], rightEntries); err != nil {
+		return nil, err
+	}
+	parent[leftIndex].Key = cloneBytes(leftEntries[len(leftEntries)-1].Key)
+	parent[rightIndex].Key = cloneBytes(rightEntries[len(rightEntries)-1].Key)
+	return parent, nil
+}
+
+func (t *Tree) rebalanceInternalChildren(parent []internalEntry, leftIndex, rightIndex int, leftEntries, rightEntries []internalEntry) ([]internalEntry, error) {
+	combined := make([]internalEntry, 0, len(leftEntries)+len(rightEntries))
+	combined = append(combined, leftEntries...)
+	combined = append(combined, rightEntries...)
+
+	leftPageID := parent[leftIndex].Child
+	rightPageID := parent[rightIndex].Child
+	if internalEntriesSize(combined) <= t.pageSize {
+		if _, err := buildInternalNode(t.pages[leftPageID], combined); err != nil {
+			return nil, err
+		}
+		delete(t.pages, rightPageID)
+		parent[leftIndex].Key = cloneBytes(combined[len(combined)-1].Key)
+		return removeInternalEntry(parent, rightIndex), nil
+	}
+
+	splitIndex, err := chooseRebalanceSplit(len(combined), t.minNodeBytes(), t.pageSize, func(index int) (left, right int) {
+		return internalEntriesSize(combined[:index]), internalEntriesSize(combined[index:])
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	leftEntries = combined[:splitIndex]
+	rightEntries = combined[splitIndex:]
+	if _, err := buildInternalNode(t.pages[leftPageID], leftEntries); err != nil {
+		return nil, err
+	}
+	if _, err := buildInternalNode(t.pages[rightPageID], rightEntries); err != nil {
+		return nil, err
+	}
+	parent[leftIndex].Key = cloneBytes(leftEntries[len(leftEntries)-1].Key)
+	parent[rightIndex].Key = cloneBytes(rightEntries[len(rightEntries)-1].Key)
+	return parent, nil
 }
 
 func (t *Tree) insertIntoInternal(pageID uint64, node Node, key, value []byte) ([]byte, *splitResult, error) {
@@ -275,6 +522,10 @@ func (t *Tree) node(pageID uint64) (Node, error) {
 		return Node{}, ErrCellOutOfRange
 	}
 	return WrapNode(page)
+}
+
+func (t *Tree) minNodeBytes() int {
+	return t.pageSize / 4
 }
 
 func (n Node) childIndexForKey(key []byte) (int, error) {
@@ -358,11 +609,21 @@ func insertLeafEntry(entries []leafEntry, index int, entry leafEntry) []leafEntr
 	return entries
 }
 
+func removeLeafEntry(entries []leafEntry, index int) []leafEntry {
+	copy(entries[index:], entries[index+1:])
+	return entries[:len(entries)-1]
+}
+
 func insertInternalEntry(entries []internalEntry, index int, entry internalEntry) []internalEntry {
 	entries = append(entries, internalEntry{})
 	copy(entries[index+1:], entries[index:])
 	entries[index] = entry
 	return entries
+}
+
+func removeInternalEntry(entries []internalEntry, index int) []internalEntry {
+	copy(entries[index:], entries[index+1:])
+	return entries[:len(entries)-1]
 }
 
 func splitLeafEntries(entries []leafEntry, pageSize int) (int, error) {
@@ -404,6 +665,43 @@ func chooseSplitIndex(total int, fits func(index int) bool) (int, error) {
 	return bestIndex, nil
 }
 
+func chooseRebalanceSplit(total, minBytes, pageSize int, sizes func(index int) (left, right int)) (int, error) {
+	bestIndex := 0
+	bestScore := math.MaxInt
+	bestPenalty := math.MaxInt
+
+	for i := 1; i < total; i++ {
+		leftSize, rightSize := sizes(i)
+		if leftSize > pageSize || rightSize > pageSize {
+			continue
+		}
+
+		penalty := 0
+		if leftSize < minBytes {
+			penalty += minBytes - leftSize
+		}
+		if rightSize < minBytes {
+			penalty += minBytes - rightSize
+		}
+
+		score := leftSize - rightSize
+		if score < 0 {
+			score = -score
+		}
+
+		if penalty < bestPenalty || (penalty == bestPenalty && score < bestScore) {
+			bestPenalty = penalty
+			bestScore = score
+			bestIndex = i
+		}
+	}
+
+	if bestIndex == 0 {
+		return 0, ErrSplitFailed
+	}
+	return bestIndex, nil
+}
+
 func leafEntriesSize(entries []leafEntry) int {
 	size := nodeHeaderSize + len(entries)*nodeSlotSize
 	for _, entry := range entries {
@@ -422,4 +720,26 @@ func internalEntriesSize(entries []internalEntry) int {
 
 func cloneBytes(src []byte) []byte {
 	return append([]byte(nil), src...)
+}
+
+func leafDeleteResult(entries []leafEntry, removed, isRoot bool, minBytes int) deleteResult {
+	result := deleteResult{removed: removed}
+	if len(entries) == 0 {
+		result.empty = true
+		return result
+	}
+	result.maxKey = cloneBytes(entries[len(entries)-1].Key)
+	result.underflow = !isRoot && leafEntriesSize(entries) < minBytes
+	return result
+}
+
+func internalDeleteResult(entries []internalEntry, removed, isRoot bool, minBytes int) deleteResult {
+	result := deleteResult{removed: removed}
+	if len(entries) == 0 {
+		result.empty = true
+		return result
+	}
+	result.maxKey = cloneBytes(entries[len(entries)-1].Key)
+	result.underflow = !isRoot && internalEntriesSize(entries) < minBytes
+	return result
 }
