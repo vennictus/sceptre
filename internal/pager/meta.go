@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 )
 
 const (
@@ -13,7 +14,8 @@ const (
 	MetaPageCount          = 2
 
 	metaMagicSize      = 8
-	metaHeaderSize     = 48
+	metaChecksumOffset = 48
+	metaHeaderSize     = 56
 	metaMagic          = "SCEPTRE\x00"
 	metaVersionOffset  = 8
 	metaPageSizeOffset = 12
@@ -24,10 +26,11 @@ const (
 )
 
 var (
-	ErrMetaPageTooSmall    = errors.New("pager: meta page too small")
-	ErrInvalidMetaMagic    = errors.New("pager: invalid meta magic")
-	ErrUnsupportedVersion  = errors.New("pager: unsupported format version")
-	ErrInvalidMetaPageSize = errors.New("pager: invalid meta page size")
+	ErrMetaPageTooSmall     = errors.New("pager: meta page too small")
+	ErrInvalidMetaMagic     = errors.New("pager: invalid meta magic")
+	ErrUnsupportedVersion   = errors.New("pager: unsupported format version")
+	ErrInvalidMetaPageSize  = errors.New("pager: invalid meta page size")
+	ErrMetaChecksumMismatch = errors.New("pager: meta checksum mismatch")
 )
 
 // Meta describes the durable root state stored in the reserved meta pages.
@@ -53,6 +56,7 @@ func (m Meta) Encode() ([]byte, error) {
 	putUint64(page[metaFreeListOffset:], m.FreeListPage)
 	putUint64(page[metaPageCountOff:], m.PageCount)
 	putUint64(page[metaGenerationOff:], m.Generation)
+	putUint32(page[metaChecksumOffset:], metaChecksum(page))
 	return page, nil
 }
 
@@ -74,6 +78,9 @@ func DecodeMeta(page []byte) (Meta, error) {
 	if pageSize < uint32(metaHeaderSize) || pageSize != uint32(len(page)) {
 		return Meta{}, ErrInvalidMetaPageSize
 	}
+	if got, want := binary.LittleEndian.Uint32(page[metaChecksumOffset:]), metaChecksum(page); got != want {
+		return Meta{}, ErrMetaChecksumMismatch
+	}
 
 	return Meta{
 		PageSize:     pageSize,
@@ -90,4 +97,13 @@ func putUint32(dst []byte, value uint32) {
 
 func putUint64(dst []byte, value uint64) {
 	binary.LittleEndian.PutUint64(dst, value)
+}
+
+func metaChecksum(page []byte) uint32 {
+	h := crc32.NewIEEE()
+	h.Write(page[:metaChecksumOffset])
+	var zero [4]byte
+	h.Write(zero[:])
+	h.Write(page[metaChecksumOffset+4:])
+	return h.Sum32()
 }

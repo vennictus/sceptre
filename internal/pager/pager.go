@@ -8,8 +8,12 @@ import (
 )
 
 var (
-	ErrInvalidPageSize = fmt.Errorf("pager: page size must be at least %d bytes", metaHeaderSize)
-	ErrFileTooSmall    = errors.New("pager: file too small for meta pages")
+	ErrInvalidPageSize   = fmt.Errorf("pager: page size must be at least %d bytes", metaHeaderSize)
+	ErrFileTooSmall      = errors.New("pager: file too small for meta pages")
+	ErrNoValidMetaPage   = errors.New("pager: no valid meta page found")
+	ErrReservedPageID    = errors.New("pager: page id is reserved for meta pages")
+	ErrPageNotAllocated  = errors.New("pager: page id not allocated")
+	ErrInvalidPageBuffer = errors.New("pager: page buffer size mismatch")
 )
 
 // Options controls how the pager initializes a database file.
@@ -70,6 +74,40 @@ func (p *Pager) Meta() Meta {
 // ActiveMetaSlot returns which reserved meta page is currently active.
 func (p *Pager) ActiveMetaSlot() int {
 	return p.activeSlot
+}
+
+// ReadPage reads a full non-meta page by page ID.
+func (p *Pager) ReadPage(pageID uint64) ([]byte, error) {
+	if pageID < MetaPageCount {
+		return nil, ErrReservedPageID
+	}
+	if pageID >= p.meta.PageCount {
+		return nil, ErrPageNotAllocated
+	}
+
+	page := make([]byte, p.pageSize)
+	if _, err := p.file.ReadAt(page, p.pageOffset(pageID)); err != nil && err != io.EOF {
+		return nil, err
+	}
+	return page, nil
+}
+
+// WritePage writes a full non-meta page by page ID.
+func (p *Pager) WritePage(pageID uint64, page []byte) error {
+	if pageID < MetaPageCount {
+		return ErrReservedPageID
+	}
+	if len(page) != int(p.pageSize) {
+		return ErrInvalidPageBuffer
+	}
+
+	if _, err := p.file.WriteAt(page, p.pageOffset(pageID)); err != nil {
+		return err
+	}
+	if nextCount := pageID + 1; nextCount > p.meta.PageCount {
+		p.meta.PageCount = nextCount
+	}
+	return nil
 }
 
 func (p *Pager) open(opts Options) error {
@@ -138,21 +176,26 @@ func (p *Pager) load() error {
 	}
 
 	first, err := p.readMetaPage(0, pageSize)
-	if err != nil {
-		return err
-	}
+	firstOK := err == nil
 	second, err := p.readMetaPage(1, pageSize)
-	if err != nil {
-		return err
-	}
+	secondOK := err == nil
 
 	p.pageSize = pageSize
-	if second.Generation >= first.Generation {
+	switch {
+	case firstOK && secondOK && second.Generation >= first.Generation:
 		p.meta = second
 		p.activeSlot = 1
-	} else {
+	case firstOK && secondOK:
 		p.meta = first
 		p.activeSlot = 0
+	case secondOK:
+		p.meta = second
+		p.activeSlot = 1
+	case firstOK:
+		p.meta = first
+		p.activeSlot = 0
+	default:
+		return ErrNoValidMetaPage
 	}
 	return nil
 }
@@ -176,6 +219,10 @@ func (p *Pager) readMetaPage(slot int, pageSize uint32) (Meta, error) {
 
 func (p *Pager) metaOffset(slot int, pageSize uint32) int64 {
 	return int64(slot) * int64(pageSize)
+}
+
+func (p *Pager) pageOffset(pageID uint64) int64 {
+	return int64(pageID) * int64(p.pageSize)
 }
 
 func readPageSize(header []byte) uint32 {
