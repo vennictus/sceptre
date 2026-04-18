@@ -123,16 +123,12 @@ func (n Node) AppendLeafCell(key, value []byte) error {
 		return ErrNodeTypeMismatch
 	}
 
-	cellSize := leafCellSize(key, value)
-	offset, err := n.reserveCell(cellSize)
+	offset, err := n.reserveCellAt(n.Count(), leafCellSize(key, value))
 	if err != nil {
 		return err
 	}
 
-	binary.LittleEndian.PutUint16(n.page[offset:], uint16(len(key)))
-	binary.LittleEndian.PutUint16(n.page[offset+2:], uint16(len(value)))
-	copy(n.page[offset+leafCellHeaderSize:], key)
-	copy(n.page[offset+leafCellHeaderSize+uint16(len(key)):], value)
+	binaryPutLeafCell(n.page[offset:], key, value)
 	return nil
 }
 
@@ -142,15 +138,12 @@ func (n Node) AppendInternalCell(child uint64, key []byte) error {
 		return ErrNodeTypeMismatch
 	}
 
-	cellSize := internalCellSize(key)
-	offset, err := n.reserveCell(cellSize)
+	offset, err := n.reserveCellAt(n.Count(), internalCellSize(key))
 	if err != nil {
 		return err
 	}
 
-	binary.LittleEndian.PutUint64(n.page[offset:], child)
-	binary.LittleEndian.PutUint16(n.page[offset+8:], uint16(len(key)))
-	copy(n.page[offset+internalCellHeaderSize:], key)
+	binaryPutInternalCell(n.page[offset:], child, key)
 	return nil
 }
 
@@ -196,21 +189,6 @@ func (n Node) InternalCell(index int) (InternalCell, error) {
 	}, nil
 }
 
-func (n Node) reserveCell(cellSize int) (uint16, error) {
-	required := nodeSlotSize + cellSize
-	if required > n.FreeSpace() {
-		return 0, ErrNodeFull
-	}
-
-	newUpper := n.Upper() - uint16(cellSize)
-	slotIndex := n.Count()
-	n.setSlot(slotIndex, newUpper)
-	n.setCount(slotIndex + 1)
-	n.setLower(n.Lower() + nodeSlotSize)
-	n.setUpper(newUpper)
-	return newUpper, nil
-}
-
 func (n Node) cellOffset(index int) (uint16, error) {
 	if index < 0 || index >= n.Count() {
 		return 0, ErrCellOutOfRange
@@ -246,4 +224,18 @@ func leafCellSize(key, value []byte) int {
 
 func internalCellSize(key []byte) int {
 	return internalCellHeaderSize + len(key)
+}
+
+func binaryPutInternalCell(dst []byte, child uint64, key []byte) {
+	putUint64(dst[0:], child)
+	putUint16(dst[8:], uint16(len(key)))
+	copy(dst[internalCellHeaderSize:], key)
+}
+
+func putUint16(dst []byte, value uint16) {
+	binary.LittleEndian.PutUint16(dst, value)
+}
+
+func putUint64(dst []byte, value uint64) {
+	binary.LittleEndian.PutUint64(dst, value)
 }
