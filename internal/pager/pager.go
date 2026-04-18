@@ -14,6 +14,7 @@ var (
 	ErrReservedPageID    = errors.New("pager: page id is reserved for meta pages")
 	ErrPageNotAllocated  = errors.New("pager: page id not allocated")
 	ErrInvalidPageBuffer = errors.New("pager: page buffer size mismatch")
+	ErrMetaPageSize      = errors.New("pager: meta page size does not match pager")
 )
 
 // Options controls how the pager initializes a database file.
@@ -76,6 +77,11 @@ func (p *Pager) ActiveMetaSlot() int {
 	return p.activeSlot
 }
 
+// Sync flushes file contents to durable storage.
+func (p *Pager) Sync() error {
+	return p.file.Sync()
+}
+
 // ReadPage reads a full non-meta page by page ID.
 func (p *Pager) ReadPage(pageID uint64) ([]byte, error) {
 	if pageID < MetaPageCount {
@@ -107,6 +113,26 @@ func (p *Pager) WritePage(pageID uint64, page []byte) error {
 	if nextCount := pageID + 1; nextCount > p.meta.PageCount {
 		p.meta.PageCount = nextCount
 	}
+	return nil
+}
+
+// PublishMeta writes the next meta page and makes it active in memory.
+func (p *Pager) PublishMeta(meta Meta) error {
+	if meta.PageSize != p.pageSize {
+		return ErrMetaPageSize
+	}
+	meta.Generation = p.meta.Generation + 1
+
+	slot := 1 - p.activeSlot
+	if err := p.writeMetaPage(slot, meta); err != nil {
+		return err
+	}
+	if err := p.file.Sync(); err != nil {
+		return err
+	}
+
+	p.meta = meta
+	p.activeSlot = slot
 	return nil
 }
 

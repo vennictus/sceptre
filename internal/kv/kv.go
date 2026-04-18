@@ -53,6 +53,31 @@ func (kv *KV) Tree() *btree.Tree {
 	return kv.tree
 }
 
+// Get looks up a key from the current tree snapshot.
+func (kv *KV) Get(key []byte) ([]byte, bool, error) {
+	return kv.tree.Get(key)
+}
+
+// Set inserts or replaces a key/value pair and persists the updated tree.
+func (kv *KV) Set(key, value []byte) error {
+	if _, err := kv.tree.Delete(key); err != nil {
+		return err
+	}
+	if err := kv.tree.Insert(key, value); err != nil {
+		return err
+	}
+	return kv.persist()
+}
+
+// Del removes a key if it exists and persists the updated tree.
+func (kv *KV) Del(key []byte) (bool, error) {
+	removed, err := kv.tree.Delete(key)
+	if err != nil || !removed {
+		return removed, err
+	}
+	return true, kv.persist()
+}
+
 func loadTree(p *pager.Pager) (*btree.Tree, error) {
 	meta := p.Meta()
 	pages := make(map[uint64][]byte)
@@ -69,4 +94,21 @@ func loadTree(p *pager.Pager) (*btree.Tree, error) {
 		NextPage: meta.PageCount,
 		Pages:    pages,
 	})
+}
+
+func (kv *KV) persist() error {
+	snapshot := kv.tree.Snapshot()
+	for pageID, page := range snapshot.Pages {
+		if err := kv.pager.WritePage(pageID, page); err != nil {
+			return err
+		}
+	}
+	if err := kv.pager.Sync(); err != nil {
+		return err
+	}
+
+	meta := kv.pager.Meta()
+	meta.RootPage = snapshot.Root
+	meta.PageCount = snapshot.NextPage
+	return kv.pager.PublishMeta(meta)
 }
