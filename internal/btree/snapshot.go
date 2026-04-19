@@ -15,6 +15,12 @@ type Snapshot struct {
 	Pages    map[uint64][]byte
 }
 
+// PageAllocator assigns stable page IDs to a remapped snapshot.
+type PageAllocator interface {
+	AllocatePage() uint64
+	NextPageID() uint64
+}
+
 // Snapshot returns a deep copy of the tree's current page state.
 func (t *Tree) Snapshot() Snapshot {
 	pages := make(map[uint64][]byte, len(t.pages))
@@ -31,13 +37,19 @@ func (t *Tree) Snapshot() Snapshot {
 
 // RemapPageIDs rewrites the snapshot into a fresh append-only page range.
 func (s Snapshot) RemapPageIDs(startPageID uint64) (Snapshot, error) {
+	alloc := &sequentialAllocator{nextPageID: startPageID}
+	return s.RemapPageIDsWithAllocator(alloc)
+}
+
+// RemapPageIDsWithAllocator rewrites the snapshot using the provided page allocator.
+func (s Snapshot) RemapPageIDsWithAllocator(alloc PageAllocator) (Snapshot, error) {
 	if s.Root == 0 {
 		if len(s.Pages) != 0 {
 			return Snapshot{}, ErrInvalidSnapshotPage
 		}
 		return Snapshot{
 			Root:     0,
-			NextPage: startPageID,
+			NextPage: alloc.NextPageID(),
 			Pages:    map[uint64][]byte{},
 		}, nil
 	}
@@ -51,10 +63,8 @@ func (s Snapshot) RemapPageIDs(startPageID uint64) (Snapshot, error) {
 	})
 
 	mapping := make(map[uint64]uint64, len(oldIDs))
-	nextPageID := startPageID
 	for _, oldID := range oldIDs {
-		mapping[oldID] = nextPageID
-		nextPageID++
+		mapping[oldID] = alloc.AllocatePage()
 	}
 
 	rootPageID, ok := mapping[s.Root]
@@ -99,9 +109,23 @@ func (s Snapshot) RemapPageIDs(startPageID uint64) (Snapshot, error) {
 
 	return Snapshot{
 		Root:     rootPageID,
-		NextPage: nextPageID,
+		NextPage: alloc.NextPageID(),
 		Pages:    pages,
 	}, nil
+}
+
+type sequentialAllocator struct {
+	nextPageID uint64
+}
+
+func (a *sequentialAllocator) AllocatePage() uint64 {
+	pageID := a.nextPageID
+	a.nextPageID++
+	return pageID
+}
+
+func (a *sequentialAllocator) NextPageID() uint64 {
+	return a.nextPageID
 }
 
 // NewTreeFromSnapshot rebuilds a tree from a persisted page snapshot.

@@ -2,6 +2,7 @@ package kv
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -298,6 +299,61 @@ func TestKVDeleteRecoveryAcrossPartialCommitBoundaries(t *testing.T) {
 			assertKVValue(t, reopened, "beta", "two", tc.wantBetaOK)
 		})
 	}
+}
+
+func TestKVReusesFreedPagesAcrossCommits(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	store := mustOpenKV(t, path)
+	defer store.Close()
+
+	var counts []uint64
+	for i := 0; i < 6; i++ {
+		if err := store.Set([]byte("alpha"), []byte(fmt.Sprintf("value-%d", i))); err != nil {
+			t.Fatalf("Set(alpha) iteration %d error = %v", i, err)
+		}
+		counts = append(counts, store.Pager().Meta().PageCount)
+	}
+
+	if counts[len(counts)-1] > 6 {
+		t.Fatalf("final page count = %d, want <= 6 (counts=%v)", counts[len(counts)-1], counts)
+	}
+	if counts[3] != counts[4] || counts[4] != counts[5] {
+		t.Fatalf("page count did not stabilize after reuse: %v", counts)
+	}
+	if store.Pager().Meta().FreeListPage == 0 {
+		t.Fatal("FreeListPage = 0 after repeated updates, want non-zero")
+	}
+}
+
+func TestKVLoadsFreeListOnReopenForReuse(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	store := mustOpenKV(t, path)
+
+	for i := 0; i < 4; i++ {
+		if err := store.Set([]byte("alpha"), []byte(fmt.Sprintf("value-%d", i))); err != nil {
+			t.Fatalf("Set(alpha) iteration %d error = %v", i, err)
+		}
+	}
+	before := store.Pager().Meta().PageCount
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened := mustOpenKV(t, path)
+	defer reopened.Close()
+
+	if err := reopened.Set([]byte("alpha"), []byte("value-reopen")); err != nil {
+		t.Fatalf("Set(alpha after reopen) error = %v", err)
+	}
+
+	if got := reopened.Pager().Meta().PageCount; got != before {
+		t.Fatalf("page count after reopen reuse = %d, want %d", got, before)
+	}
+	assertKVValue(t, reopened, "alpha", "value-reopen", true)
 }
 
 func mustOpenKV(t *testing.T, path string) *KV {

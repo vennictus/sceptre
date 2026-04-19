@@ -3,7 +3,9 @@ package kv
 import (
 	"fmt"
 	"sceptre/internal/btree"
+	"sceptre/internal/freelist"
 	"sceptre/internal/pager"
+	"sort"
 )
 
 // Options controls how the KV layer initializes its backing pager.
@@ -15,6 +17,7 @@ type Options struct {
 type KV struct {
 	pager      *pager.Pager
 	tree       *btree.Tree
+	free       freelist.State
 	commitHook commitHook
 }
 
@@ -30,10 +33,16 @@ func Open(path string, opts Options) (*KV, error) {
 		p.Close()
 		return nil, err
 	}
+	free, err := loadFreeList(p)
+	if err != nil {
+		p.Close()
+		return nil, err
+	}
 
 	return &KV{
 		pager: p,
 		tree:  tree,
+		free:  free,
 	}, nil
 }
 
@@ -63,28 +72,30 @@ func (kv *KV) Get(key []byte) ([]byte, bool, error) {
 // Set inserts or replaces a key/value pair and persists the updated tree.
 func (kv *KV) Set(key, value []byte) error {
 	previous := kv.tree.Snapshot()
+	previousFree := kv.free.Clone()
 
 	if _, err := kv.tree.Delete(key); err != nil {
-		return kv.rollback(previous, err)
+		return kv.rollback(previous, previousFree, err)
 	}
 	if err := kv.tree.Insert(key, value); err != nil {
-		return kv.rollback(previous, err)
+		return kv.rollback(previous, previousFree, err)
 	}
-	return kv.persistCommitted(previous)
+	return kv.persistCommitted(previous, previousFree)
 }
 
 // Del removes a key if it exists and persists the updated tree.
 func (kv *KV) Del(key []byte) (bool, error) {
 	previous := kv.tree.Snapshot()
+	previousFree := kv.free.Clone()
 
 	removed, err := kv.tree.Delete(key)
 	if err != nil {
-		return false, kv.rollback(previous, err)
+		return false, kv.rollback(previous, previousFree, err)
 	}
 	if !removed {
 		return false, nil
 	}
-	if err := kv.persistCommitted(previous); err != nil {
+	if err := kv.persistCommitted(previous, previousFree); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -104,6 +115,10 @@ func loadTree(p *pager.Pager) (*btree.Tree, error) {
 		NextPage: meta.PageCount,
 		Pages:    pages,
 	})
+}
+
+func loadFreeList(p *pager.Pager) (freelist.State, error) {
+	return freelist.Load(p, p.Meta().FreeListPage)
 }
 
 func loadReachablePages(p *pager.Pager, pageID uint64, pages map[uint64][]byte) error {
@@ -140,14 +155,29 @@ func loadReachablePages(p *pager.Pager, pageID uint64, pages map[uint64][]byte) 
 	}
 }
 
-func (kv *KV) persist() error {
+func (kv *KV) persist(previous btree.Snapshot, previousFree freelist.State) error {
+	alloc := freelist.NewAllocator(previousFree.FreePages, kv.pager.Meta().PageCount)
+
 	snapshot := kv.tree.Snapshot()
-	durable, err := snapshot.RemapPageIDs(kv.pager.Meta().PageCount)
+	durable, err := snapshot.RemapPageIDsWithAllocator(alloc)
 	if err != nil {
 		return err
 	}
 
-	for pageID, page := range durable.Pages {
+	retiredPages := append(sortedPageIDs(previous.Pages), previousFree.PageIDs...)
+	nextFree, err := freelist.Build(int(kv.pager.PageSize()), alloc, retiredPages)
+	if err != nil {
+		return err
+	}
+
+	for _, pageID := range sortedPageIDs(durable.Pages) {
+		page := durable.Pages[pageID]
+		if err := kv.pager.WritePage(pageID, page); err != nil {
+			return err
+		}
+	}
+	for _, pageID := range nextFree.PageIDs {
+		page := nextFree.Pages[pageID]
 		if err := kv.pager.WritePage(pageID, page); err != nil {
 			return err
 		}
@@ -164,29 +194,34 @@ func (kv *KV) persist() error {
 
 	meta := kv.pager.Meta()
 	meta.RootPage = durable.Root
-	meta.PageCount = durable.NextPage
+	meta.FreeListPage = nextFree.HeadPage
+	meta.PageCount = alloc.NextPageID()
 	if err := kv.pager.PublishMeta(meta); err != nil {
+		return err
+	}
+	if err := kv.installCommittedState(durable, nextFree); err != nil {
 		return err
 	}
 	return kv.runCommitHook(commitStageMetaPublished)
 }
 
-func (kv *KV) persistCommitted(previous btree.Snapshot) error {
-	if err := kv.persist(); err != nil {
+func (kv *KV) persistCommitted(previous btree.Snapshot, previousFree freelist.State) error {
+	if err := kv.persist(previous, previousFree); err != nil {
 		if stage, ok := interruptedCommitStage(err); ok && stage == commitStageMetaPublished {
 			return err
 		}
-		return kv.rollback(previous, err)
+		return kv.rollback(previous, previousFree, err)
 	}
 	return nil
 }
 
-func (kv *KV) rollback(previous btree.Snapshot, cause error) error {
+func (kv *KV) rollback(previous btree.Snapshot, previousFree freelist.State, cause error) error {
 	restored, err := btree.NewTreeFromSnapshot(int(kv.pager.PageSize()), previous)
 	if err != nil {
 		return fmt.Errorf("%w: rollback failed: %v", cause, err)
 	}
 	kv.tree = restored
+	kv.free = previousFree.Clone()
 	return cause
 }
 
@@ -195,4 +230,25 @@ func (kv *KV) runCommitHook(stage commitStage) error {
 		return nil
 	}
 	return kv.commitHook(stage)
+}
+
+func (kv *KV) installCommittedState(snapshot btree.Snapshot, free freelist.State) error {
+	tree, err := btree.NewTreeFromSnapshot(int(kv.pager.PageSize()), snapshot)
+	if err != nil {
+		return err
+	}
+	kv.tree = tree
+	kv.free = free.Clone()
+	return nil
+}
+
+func sortedPageIDs(pages map[uint64][]byte) []uint64 {
+	pageIDs := make([]uint64, 0, len(pages))
+	for pageID := range pages {
+		pageIDs = append(pageIDs, pageID)
+	}
+	sort.Slice(pageIDs, func(i, j int) bool {
+		return pageIDs[i] < pageIDs[j]
+	})
+	return pageIDs
 }
