@@ -1,6 +1,7 @@
 package table
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ const (
 	TypeInt64 Type = 2
 
 	rowKeyPrefix       byte   = 0x10
+	indexKeyPrefix     byte   = 0x11
 	initialTablePrefix uint32 = 1
 )
 
@@ -26,6 +28,9 @@ var (
 	ErrInvalidValue    = errors.New("table: invalid value")
 	ErrRowExists       = errors.New("table: row already exists")
 	ErrRowNotFound     = errors.New("table: row not found")
+	ErrInvalidIndexDef = errors.New("table: invalid index definition")
+	ErrIndexExists     = errors.New("table: index already exists")
+	ErrIndexNotFound   = errors.New("table: index not found")
 )
 
 var (
@@ -46,10 +51,18 @@ type Column struct {
 
 // TableDef is the persisted schema for a table.
 type TableDef struct {
-	Name       string   `json:"name"`
-	Columns    []Column `json:"columns"`
-	PrimaryKey []string `json:"primary_key"`
-	Prefix     uint32   `json:"prefix"`
+	Name       string     `json:"name"`
+	Columns    []Column   `json:"columns"`
+	PrimaryKey []string   `json:"primary_key"`
+	Prefix     uint32     `json:"prefix"`
+	Indexes    []IndexDef `json:"indexes,omitempty"`
+}
+
+// IndexDef is the persisted schema for a secondary index.
+type IndexDef struct {
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
+	Prefix  uint32   `json:"prefix"`
 }
 
 // Value stores one typed scalar value.
@@ -161,6 +174,121 @@ func (db *DB) Table(name string) (TableDef, bool, error) {
 	return cloneTableDef(def), true, nil
 }
 
+// CreateIndex adds a secondary index and backfills entries for existing rows.
+func (db *DB) CreateIndex(tableName string, index IndexDef) error {
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return err
+	}
+	if err := validateNewIndexDef(def, index); err != nil {
+		return err
+	}
+
+	prefix, err := db.nextTablePrefix()
+	if err != nil {
+		return err
+	}
+	index.Prefix = prefix
+	if err := db.storeNextTablePrefix(prefix + 1); err != nil {
+		return err
+	}
+
+	scanner, err := db.Scan(tableName, ScanBounds{})
+	if err != nil {
+		return err
+	}
+	for scanner.Valid() {
+		row, err := scanner.Deref()
+		if err != nil {
+			return err
+		}
+		key, err := encodeIndexKey(def, index, row)
+		if err != nil {
+			return err
+		}
+		if err := db.kv.Set(key, nil); err != nil {
+			return err
+		}
+		if err := scanner.Next(); err != nil {
+			return err
+		}
+	}
+
+	def.Indexes = append(def.Indexes, index)
+	encoded, err := encodeTableDef(def)
+	if err != nil {
+		return err
+	}
+	return db.kv.Set(catalogTableKey(def.Name), encoded)
+}
+
+// Index loads an index definition by name.
+func (db *DB) Index(tableName, indexName string) (IndexDef, bool, error) {
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return IndexDef{}, false, err
+	}
+	index, ok := findIndex(def, indexName)
+	return cloneIndexDef(index), ok, nil
+}
+
+// LookupIndex returns rows matching all columns of a secondary index key.
+func (db *DB) LookupIndex(tableName, indexName string, values Record) ([]Record, error) {
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return nil, err
+	}
+	index, ok := findIndex(def, indexName)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrIndexNotFound, indexName)
+	}
+	if err := validateIndexRecord(def, index, values); err != nil {
+		return nil, err
+	}
+
+	prefix, err := encodeIndexLookupPrefix(def, index, values)
+	if err != nil {
+		return nil, err
+	}
+	upper, hasUpper := prefixEnd(prefix)
+
+	iter := db.kv.Iterator()
+	if err := iter.SeekGE(prefix); err != nil {
+		return nil, err
+	}
+
+	var rows []Record
+	for iter.Valid() {
+		key, _, err := iter.Deref()
+		if err != nil {
+			return nil, err
+		}
+		if hasUpper {
+			if bytes.Compare(key, upper) >= 0 {
+				break
+			}
+		} else if !bytes.HasPrefix(key, prefix) {
+			break
+		}
+
+		primaryKey, err := decodeIndexPrimaryKey(def, index, key, len(prefix))
+		if err != nil {
+			return nil, err
+		}
+		row, ok, err := db.Get(tableName, primaryKey)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			rows = append(rows, row)
+		}
+		if err := iter.Next(); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
+}
+
 // Insert writes a new row and fails if the primary key already exists.
 func (db *DB) Insert(tableName string, record Record) error {
 	return db.writeRow(tableName, record, writeInsertOnly)
@@ -216,7 +344,18 @@ func (db *DB) Delete(tableName string, key Record) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return db.kv.Del(rowKey)
+	old, ok, err := db.Get(tableName, key)
+	if err != nil || !ok {
+		return ok, err
+	}
+	removed, err := db.kv.Del(rowKey)
+	if err != nil || !removed {
+		return removed, err
+	}
+	if err := db.deleteIndexEntries(def, old); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type writeMode int
@@ -245,6 +384,17 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	if err != nil {
 		return err
 	}
+	var old Record
+	if exists {
+		var ok bool
+		old, ok, err = db.Get(tableName, keyRecord)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrRowNotFound
+		}
+	}
 	switch {
 	case mode == writeInsertOnly && exists:
 		return ErrRowExists
@@ -256,7 +406,15 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	if err != nil {
 		return err
 	}
-	return db.kv.Set(rowKey, rowValue)
+	if err := db.kv.Set(rowKey, rowValue); err != nil {
+		return err
+	}
+	if exists {
+		if err := db.deleteIndexEntries(def, old); err != nil {
+			return err
+		}
+	}
+	return db.putIndexEntries(def, record)
 }
 
 func (db *DB) mustTable(name string) (TableDef, error) {
@@ -344,6 +502,58 @@ func validateTableDef(def TableDef, requirePrefix bool) error {
 		}
 		seenPK[name] = struct{}{}
 	}
+	if err := validateIndexDefs(def, columns, requirePrefix); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateNewIndexDef(def TableDef, index IndexDef) error {
+	columns := make(map[string]Type, len(def.Columns))
+	for _, column := range def.Columns {
+		columns[column.Name] = column.Type
+	}
+	if err := validateIndexDef(index, columns, false); err != nil {
+		return err
+	}
+	if _, exists := findIndex(def, index.Name); exists {
+		return fmt.Errorf("%w: %s", ErrIndexExists, index.Name)
+	}
+	return nil
+}
+
+func validateIndexDefs(def TableDef, columns map[string]Type, requirePrefix bool) error {
+	seen := make(map[string]struct{}, len(def.Indexes))
+	for _, index := range def.Indexes {
+		if err := validateIndexDef(index, columns, requirePrefix); err != nil {
+			return err
+		}
+		if _, exists := seen[index.Name]; exists {
+			return ErrInvalidIndexDef
+		}
+		seen[index.Name] = struct{}{}
+	}
+	return nil
+}
+
+func validateIndexDef(index IndexDef, columns map[string]Type, requirePrefix bool) error {
+	if index.Name == "" || len(index.Columns) == 0 {
+		return ErrInvalidIndexDef
+	}
+	if requirePrefix && index.Prefix == 0 {
+		return ErrInvalidIndexDef
+	}
+
+	seen := make(map[string]struct{}, len(index.Columns))
+	for _, name := range index.Columns {
+		if _, ok := columns[name]; !ok {
+			return ErrInvalidIndexDef
+		}
+		if _, exists := seen[name]; exists {
+			return ErrInvalidIndexDef
+		}
+		seen[name] = struct{}{}
+	}
 	return nil
 }
 
@@ -384,6 +594,28 @@ func validateKeyRecord(def TableDef, record Record) error {
 	}
 	for name := range record.Values {
 		if !isPrimaryKey(def, name) {
+			return ErrInvalidRecord
+		}
+	}
+	return nil
+}
+
+func validateIndexRecord(def TableDef, index IndexDef, record Record) error {
+	if len(record.Values) != len(index.Columns) {
+		return ErrInvalidRecord
+	}
+	for _, name := range index.Columns {
+		value, ok := record.Values[name]
+		if !ok {
+			return ErrInvalidRecord
+		}
+		valueType, _ := columnType(def, name)
+		if !valueMatchesType(value, valueType) {
+			return ErrInvalidValue
+		}
+	}
+	for name := range record.Values {
+		if !indexHasColumn(index, name) {
 			return ErrInvalidRecord
 		}
 	}
@@ -447,6 +679,100 @@ func primaryKeyRecord(def TableDef, record Record) Record {
 	return Record{Values: values}
 }
 
+func (db *DB) putIndexEntries(def TableDef, record Record) error {
+	for _, index := range def.Indexes {
+		key, err := encodeIndexKey(def, index, record)
+		if err != nil {
+			return err
+		}
+		if err := db.kv.Set(key, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) deleteIndexEntries(def TableDef, record Record) error {
+	for _, index := range def.Indexes {
+		key, err := encodeIndexKey(def, index, record)
+		if err != nil {
+			return err
+		}
+		if _, err := db.kv.Del(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func encodeIndexKey(def TableDef, index IndexDef, record Record) ([]byte, error) {
+	out := indexKeyStart(index)
+	for _, name := range index.Columns {
+		value := record.Values[name]
+		valueType, _ := columnType(def, name)
+		if !valueMatchesType(value, valueType) {
+			return nil, ErrInvalidValue
+		}
+		out = appendEncodedValue(out, value)
+	}
+	for _, name := range def.PrimaryKey {
+		out = appendEncodedValue(out, record.Values[name])
+	}
+	return out, nil
+}
+
+func encodeIndexLookupPrefix(def TableDef, index IndexDef, values Record) ([]byte, error) {
+	if err := validateIndexRecord(def, index, values); err != nil {
+		return nil, err
+	}
+
+	out := indexKeyStart(index)
+	for _, name := range index.Columns {
+		out = appendEncodedValue(out, values.Values[name])
+	}
+	return out, nil
+}
+
+func decodeIndexPrimaryKey(def TableDef, index IndexDef, key []byte, prefixLen int) (Record, error) {
+	start := indexKeyStart(index)
+	if !bytes.HasPrefix(key, start) || prefixLen > len(key) {
+		return Record{}, ErrCorruptRecord
+	}
+
+	values := make(map[string]Value, len(def.PrimaryKey))
+	remaining := key[prefixLen:]
+	for _, name := range def.PrimaryKey {
+		valueType, _ := columnType(def, name)
+		value, consumed, err := consumeEncodedValue(remaining, valueType)
+		if err != nil {
+			return Record{}, err
+		}
+		values[name] = value
+		remaining = remaining[consumed:]
+	}
+	if len(remaining) != 0 {
+		return Record{}, ErrCorruptRecord
+	}
+	return Record{Values: values}, nil
+}
+
+func indexKeyStart(index IndexDef) []byte {
+	out := []byte{indexKeyPrefix, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(out[1:], index.Prefix)
+	return out
+}
+
+func prefixEnd(prefix []byte) ([]byte, bool) {
+	end := append([]byte(nil), prefix...)
+	for i := len(end) - 1; i >= 0; i-- {
+		if end[i] != 0xFF {
+			end[i]++
+			return end[:i+1], true
+		}
+	}
+	return nil, false
+}
+
 func catalogTableKey(name string) []byte {
 	key := append([]byte(nil), catalogTableStart...)
 	return append(key, []byte(name)...)
@@ -478,14 +804,44 @@ func isPrimaryKey(def TableDef, name string) bool {
 	return false
 }
 
+func findIndex(def TableDef, name string) (IndexDef, bool) {
+	for _, index := range def.Indexes {
+		if index.Name == name {
+			return index, true
+		}
+	}
+	return IndexDef{}, false
+}
+
+func indexHasColumn(index IndexDef, name string) bool {
+	for _, column := range index.Columns {
+		if column == name {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneTableDef(def TableDef) TableDef {
 	out := TableDef{
 		Name:       def.Name,
 		Prefix:     def.Prefix,
 		Columns:    append([]Column(nil), def.Columns...),
 		PrimaryKey: append([]string(nil), def.PrimaryKey...),
+		Indexes:    make([]IndexDef, 0, len(def.Indexes)),
+	}
+	for _, index := range def.Indexes {
+		out.Indexes = append(out.Indexes, cloneIndexDef(index))
 	}
 	return out
+}
+
+func cloneIndexDef(index IndexDef) IndexDef {
+	return IndexDef{
+		Name:    index.Name,
+		Prefix:  index.Prefix,
+		Columns: append([]string(nil), index.Columns...),
+	}
 }
 
 func cloneValue(value Value) Value {
