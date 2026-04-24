@@ -76,6 +76,118 @@ func TestTxDeleteSeesPendingWrites(t *testing.T) {
 	assertKVValue(t, store, "alpha", "", false)
 }
 
+func TestManagedTxReadsStableSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store := mustOpenKV(t)
+	defer store.Close()
+	if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatalf("Set(alpha) error = %v", err)
+	}
+
+	manager := NewManager(store)
+	reader := manager.Begin()
+	writer := manager.Begin()
+	if err := writer.Set([]byte("alpha"), []byte("two")); err != nil {
+		t.Fatalf("writer.Set(alpha) error = %v", err)
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatalf("writer.Commit() error = %v", err)
+	}
+
+	assertTxValue(t, reader, "alpha", "one", true)
+	reader.Abort()
+}
+
+func TestManagedTxDetectsReadWriteConflict(t *testing.T) {
+	t.Parallel()
+
+	store := mustOpenKV(t)
+	defer store.Close()
+	if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatalf("Set(alpha) error = %v", err)
+	}
+
+	manager := NewManager(store)
+	first := manager.Begin()
+	assertTxValue(t, first, "alpha", "one", true)
+
+	second := manager.Begin()
+	if err := second.Set([]byte("alpha"), []byte("two")); err != nil {
+		t.Fatalf("second.Set(alpha) error = %v", err)
+	}
+	if err := second.Commit(); err != nil {
+		t.Fatalf("second.Commit() error = %v", err)
+	}
+
+	if err := first.Set([]byte("beta"), []byte("derived")); err != nil {
+		t.Fatalf("first.Set(beta) error = %v", err)
+	}
+	if err := first.Commit(); !errors.Is(err, ErrConflict) {
+		t.Fatalf("first.Commit() error = %v, want %v", err, ErrConflict)
+	}
+	assertKVValue(t, store, "beta", "", false)
+}
+
+func TestManagedTxAllowsNonConflictingCommits(t *testing.T) {
+	t.Parallel()
+
+	store := mustOpenKV(t)
+	defer store.Close()
+	if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatalf("Set(alpha) error = %v", err)
+	}
+
+	manager := NewManager(store)
+	first := manager.Begin()
+	assertTxValue(t, first, "alpha", "one", true)
+
+	second := manager.Begin()
+	if err := second.Set([]byte("beta"), []byte("two")); err != nil {
+		t.Fatalf("second.Set(beta) error = %v", err)
+	}
+	if err := second.Commit(); err != nil {
+		t.Fatalf("second.Commit() error = %v", err)
+	}
+
+	if err := first.Set([]byte("gamma"), []byte("three")); err != nil {
+		t.Fatalf("first.Set(gamma) error = %v", err)
+	}
+	if err := first.Commit(); err != nil {
+		t.Fatalf("first.Commit() error = %v", err)
+	}
+
+	assertKVValue(t, store, "beta", "two", true)
+	assertKVValue(t, store, "gamma", "three", true)
+}
+
+func TestManagerTracksActiveSnapshots(t *testing.T) {
+	t.Parallel()
+
+	store := mustOpenKV(t)
+	defer store.Close()
+
+	manager := NewManager(store)
+	first := manager.Begin()
+	second := manager.Begin()
+
+	if got, want := len(manager.ActiveSnapshots()), 2; got != want {
+		t.Fatalf("ActiveSnapshots() len = %d, want %d", got, want)
+	}
+
+	first.Abort()
+	if got, want := len(manager.ActiveSnapshots()), 1; got != want {
+		t.Fatalf("ActiveSnapshots() len after abort = %d, want %d", got, want)
+	}
+
+	if err := second.Commit(); err != nil {
+		t.Fatalf("second.Commit() error = %v", err)
+	}
+	if got := len(manager.ActiveSnapshots()); got != 0 {
+		t.Fatalf("ActiveSnapshots() len after commit = %d, want 0", got)
+	}
+}
+
 func mustOpenKV(t *testing.T) *kv.KV {
 	t.Helper()
 
