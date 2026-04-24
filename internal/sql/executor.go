@@ -99,19 +99,16 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 }
 
 func executeSelect(db *table.DB, stmt *SelectStmt) (Result, error) {
-	def, ok, err := db.Table(stmt.Table)
+	plan, def, err := planQuery(db, "select", stmt.Table, stmt.Where)
 	if err != nil {
 		return Result{}, err
-	}
-	if !ok {
-		return Result{}, table.ErrTableNotFound
 	}
 
 	columns, err := selectColumns(def, stmt)
 	if err != nil {
 		return Result{}, err
 	}
-	scanner, err := db.Scan(stmt.Table, table.ScanBounds{})
+	rows, err := candidateRows(db, def, plan)
 	if err != nil {
 		return Result{}, err
 	}
@@ -126,11 +123,7 @@ func executeSelect(db *table.DB, stmt *SelectStmt) (Result, error) {
 	}
 
 	result := Result{Columns: columns}
-	for scanner.Valid() {
-		row, err := scanner.Deref()
-		if err != nil {
-			return Result{}, err
-		}
+	for _, row := range rows {
 		matches, err := evalWhere(stmt.Where, row)
 		if err != nil {
 			return Result{}, err
@@ -145,47 +138,33 @@ func executeSelect(db *table.DB, stmt *SelectStmt) (Result, error) {
 				}
 			}
 		}
-		if err := scanner.Next(); err != nil {
-			return Result{}, err
-		}
 	}
 	result.RowsAffected = len(result.Rows)
 	return result, nil
 }
 
 func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
-	def, ok, err := db.Table(stmt.Table)
+	plan, def, err := planQuery(db, "update", stmt.Table, stmt.Where)
 	if err != nil {
 		return Result{}, err
 	}
-	if !ok {
-		return Result{}, table.ErrTableNotFound
-	}
-
-	scanner, err := db.Scan(stmt.Table, table.ScanBounds{})
+	rows, err := candidateRows(db, def, plan)
 	if err != nil {
 		return Result{}, err
 	}
 
-	var rows []table.Record
-	for scanner.Valid() {
-		row, err := scanner.Deref()
-		if err != nil {
-			return Result{}, err
-		}
+	var matchesRows []table.Record
+	for _, row := range rows {
 		matches, err := evalWhere(stmt.Where, row)
 		if err != nil {
 			return Result{}, err
 		}
 		if matches {
-			rows = append(rows, row)
-		}
-		if err := scanner.Next(); err != nil {
-			return Result{}, err
+			matchesRows = append(matchesRows, row)
 		}
 	}
 
-	for _, row := range rows {
+	for _, row := range matchesRows {
 		updated := table.NewRecord(row.Values)
 		for _, assignment := range stmt.Assignments {
 			valueType, ok := columnType(def, assignment.Column)
@@ -202,42 +181,31 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 			return Result{}, err
 		}
 	}
-	return Result{RowsAffected: len(rows)}, nil
+	return Result{RowsAffected: len(matchesRows)}, nil
 }
 
 func executeDelete(db *table.DB, stmt *DeleteStmt) (Result, error) {
-	def, ok, err := db.Table(stmt.Table)
+	plan, def, err := planQuery(db, "delete", stmt.Table, stmt.Where)
 	if err != nil {
 		return Result{}, err
 	}
-	if !ok {
-		return Result{}, table.ErrTableNotFound
-	}
-
-	scanner, err := db.Scan(stmt.Table, table.ScanBounds{})
+	rows, err := candidateRows(db, def, plan)
 	if err != nil {
 		return Result{}, err
 	}
 
-	var rows []table.Record
-	for scanner.Valid() {
-		row, err := scanner.Deref()
-		if err != nil {
-			return Result{}, err
-		}
+	var matchesRows []table.Record
+	for _, row := range rows {
 		matches, err := evalWhere(stmt.Where, row)
 		if err != nil {
 			return Result{}, err
 		}
 		if matches {
-			rows = append(rows, row)
-		}
-		if err := scanner.Next(); err != nil {
-			return Result{}, err
+			matchesRows = append(matchesRows, row)
 		}
 	}
 
-	for _, row := range rows {
+	for _, row := range matchesRows {
 		removed, err := db.Delete(stmt.Table, primaryKeyRecord(def, row))
 		if err != nil {
 			return Result{}, err
@@ -246,7 +214,7 @@ func executeDelete(db *table.DB, stmt *DeleteStmt) (Result, error) {
 			return Result{}, table.ErrRowNotFound
 		}
 	}
-	return Result{RowsAffected: len(rows)}, nil
+	return Result{RowsAffected: len(matchesRows)}, nil
 }
 
 type evalResult struct {
@@ -421,6 +389,82 @@ func projectRow(row table.Record, columns []string) []table.Value {
 		out = append(out, row.Values[column])
 	}
 	return out
+}
+
+func candidateRows(db *table.DB, def table.TableDef, plan Plan) ([]table.Record, error) {
+	switch plan.Access {
+	case AccessPrimaryKeyLookup:
+		key, err := lookupRecord(plan.Lookup)
+		if err != nil {
+			return nil, err
+		}
+		row, ok, err := db.Get(def.Name, key)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, nil
+		}
+		return []table.Record{row}, nil
+	case AccessSecondaryIndexLookup:
+		key, err := lookupRecord(plan.Lookup)
+		if err != nil {
+			return nil, err
+		}
+		return db.LookupIndex(def.Name, plan.Index, key)
+	case AccessPrimaryKeyRange:
+		bounds, err := scanBoundsFromPlan(def, plan)
+		if err != nil {
+			return nil, err
+		}
+		return scanRows(db, def.Name, bounds)
+	default:
+		return scanRows(db, def.Name, table.ScanBounds{})
+	}
+}
+
+func scanRows(db *table.DB, tableName string, bounds table.ScanBounds) ([]table.Record, error) {
+	scanner, err := db.Scan(tableName, bounds)
+	if err != nil {
+		return nil, err
+	}
+	var rows []table.Record
+	for scanner.Valid() {
+		row, err := scanner.Deref()
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+		if err := scanner.Next(); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
+}
+
+func lookupRecord(conditions []Condition) (table.Record, error) {
+	values := make(map[string]table.Value, len(conditions))
+	for _, condition := range conditions {
+		values[condition.Column] = literalUntyped(condition.Literal)
+	}
+	return table.NewRecord(values), nil
+}
+
+func scanBoundsFromPlan(def table.TableDef, plan Plan) (table.ScanBounds, error) {
+	var bounds table.ScanBounds
+	if plan.Lower != nil {
+		bounds.Lower = &table.Bound{
+			Key:       table.NewRecord(map[string]table.Value{plan.Lower.Column: literalUntyped(plan.Lower.Literal)}),
+			Inclusive: plan.Lower.Op == ">=",
+		}
+	}
+	if plan.Upper != nil {
+		bounds.Upper = &table.Bound{
+			Key:       table.NewRecord(map[string]table.Value{plan.Upper.Column: literalUntyped(plan.Upper.Literal)}),
+			Inclusive: plan.Upper.Op == "<=",
+		}
+	}
+	return bounds, nil
 }
 
 func primaryKeyRecord(def table.TableDef, row table.Record) table.Record {

@@ -16,6 +16,7 @@ Usage:
   sceptre
   sceptre help
   sceptre sql <db-path> "<statement>"
+  sceptre explain <db-path> "<statement>"
   sceptre inspect meta <db-path>
   sceptre inspect tree <db-path>
   sceptre inspect freelist <db-path>
@@ -33,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "sql":
 		return runSQL(args[1:], stdout, stderr)
+	case "explain":
+		return runExplain(args[1:], stdout, stderr)
 	case "inspect":
 		return runInspect(args[1:], stdout, stderr)
 	default:
@@ -62,6 +65,29 @@ func runSQL(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	printSQLResult(stdout, result)
+	return 0
+}
+
+func runExplain(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprint(stderr, "sceptre explain: expected <db-path> and <statement>\n\n")
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	db, err := table.Open(args[0], table.Options{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre explain: open: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	plan, err := sql.Explain(db, strings.Join(args[1:], " "))
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre explain: %v\n", err)
+		return 1
+	}
+	printExplainResult(stdout, plan)
 	return 0
 }
 
@@ -133,6 +159,35 @@ func printSQLResult(stdout io.Writer, result sql.Result) {
 	}
 }
 
+func printExplainResult(stdout io.Writer, plan sql.Plan) {
+	fmt.Fprintf(stdout, "statement=%s\n", plan.Statement)
+	fmt.Fprintf(stdout, "table=%s\n", plan.Table)
+	fmt.Fprintf(stdout, "access=%s\n", plan.Access)
+	if plan.Index != "" {
+		fmt.Fprintf(stdout, "index=%s\n", plan.Index)
+	}
+	if len(plan.Lookup) > 0 {
+		parts := make([]string, 0, len(plan.Lookup))
+		for _, condition := range plan.Lookup {
+			parts = append(parts, sqlFormatCondition(condition))
+		}
+		fmt.Fprintf(stdout, "lookup=%s\n", strings.Join(parts, ", "))
+	}
+	if plan.Lower != nil {
+		fmt.Fprintf(stdout, "lower=%s\n", sqlFormatCondition(*plan.Lower))
+	}
+	if plan.Upper != nil {
+		fmt.Fprintf(stdout, "upper=%s\n", sqlFormatCondition(*plan.Upper))
+	}
+	if plan.Limit != nil {
+		fmt.Fprintf(stdout, "limit=%d\n", *plan.Limit)
+	}
+	if plan.Offset != nil {
+		fmt.Fprintf(stdout, "offset=%d\n", *plan.Offset)
+	}
+	fmt.Fprintf(stdout, "residual=%s\n", sql.FormatExpr(plan.Residual))
+}
+
 func formatValue(value table.Value) string {
 	switch value.Type {
 	case table.TypeInt64:
@@ -149,6 +204,10 @@ func formatBytes(value []byte) string {
 		return `""`
 	}
 	return fmt.Sprintf("%q", string(value))
+}
+
+func sqlFormatCondition(condition sql.Condition) string {
+	return fmt.Sprintf("%s %s %s", condition.Column, condition.Op, sql.FormatLiteral(condition.Literal))
 }
 
 func main() {

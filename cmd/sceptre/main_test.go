@@ -23,6 +23,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre sql <db-path>") {
 		t.Fatalf("run() stdout = %q, want sql usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre explain <db-path>") {
+		t.Fatalf("run() stdout = %q, want explain usage", stdout.String())
+	}
 }
 
 func TestRunRejectsUnknownCommand(t *testing.T) {
@@ -92,6 +95,33 @@ func TestRunInspectMetaAndTree(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "entries=") {
 		t.Fatalf("run(inspect tree) stdout = %q, want entries", stdout.String())
+	}
+}
+
+func TestRunExplainPrintsPlan(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	runOK(t, []string{"sql", path, "create table users (id int64, name bytes, age int64, primary key (id))"})
+	runOK(t, []string{"sql", path, "create index users_age on users (age)"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"explain", path, "select * from users where age = 31 and name = 'Ada'"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(explain) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "access=secondary_index_lookup") {
+		t.Fatalf("run(explain) stdout = %q, want access path", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "index=users_age") {
+		t.Fatalf("run(explain) stdout = %q, want index name", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "lookup=age = 31") {
+		t.Fatalf("run(explain) stdout = %q, want lookup", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "residual=name = 'Ada'") {
+		t.Fatalf("run(explain) stdout = %q, want residual", stdout.String())
 	}
 }
 
