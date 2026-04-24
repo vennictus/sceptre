@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -73,6 +74,32 @@ func TestKVAtomicVisibilityFallsBackToPreviousMeta(t *testing.T) {
 	assertKVValue(t, reopened, "alpha", "v1", true)
 }
 
+func TestKVOpenRejectsCorruptLeafPage(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	store := mustOpenKV(t, path)
+
+	if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatalf("Set(alpha) error = %v", err)
+	}
+
+	rootPage := store.Pager().Meta().RootPage
+	pageSize := store.Pager().PageSize()
+	dbPath := store.Pager().Path()
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	corruptFirstNodeSlotOffset(t, dbPath, pageSize, rootPage)
+
+	reopened, err := Open(dbPath, Options{})
+	if err == nil {
+		reopened.Close()
+		t.Fatal("Open() error = nil, want corrupt page error")
+	}
+}
+
 func TestKVDeleteMissingKeyIsStable(t *testing.T) {
 	t.Parallel()
 
@@ -89,6 +116,37 @@ func TestKVDeleteMissingKeyIsStable(t *testing.T) {
 	}
 
 	assertKVValue(t, store, "missing", "", false)
+}
+
+func TestKVInterruptedPreMetaCommitDoesNotAdvancePageCount(t *testing.T) {
+	stages := []commitStage{
+		commitStagePagesWritten,
+		commitStagePagesSynced,
+	}
+
+	for _, stage := range stages {
+		t.Run(string(stage), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "sceptre.db")
+			store := mustOpenKV(t, path)
+			defer store.Close()
+
+			if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+				t.Fatalf("Set(alpha=one) error = %v", err)
+			}
+
+			before := store.Pager().Meta().PageCount
+			store.commitHook = failAfterCommitStage(stage)
+			err := store.Set([]byte("alpha"), []byte("uno"))
+			if !errors.Is(err, errCommitInterrupted) {
+				t.Fatalf("Set(alpha=uno) error = %v, want %v", err, errCommitInterrupted)
+			}
+
+			if got := store.Pager().Meta().PageCount; got != before {
+				t.Fatalf("Meta().PageCount = %d after interrupted commit, want %d", got, before)
+			}
+			assertKVValue(t, store, "alpha", "one", true)
+		})
+	}
 }
 
 func TestKVInterruptedSetMaintainsProcessView(t *testing.T) {
@@ -399,6 +457,26 @@ func corruptMetaMagicByte(t *testing.T, path string, slot int, pageSize uint32) 
 		t.Fatalf("ReadAt() error = %v", err)
 	}
 	buf[0] ^= 0xFF
+	if _, err := file.WriteAt(buf, offset); err != nil {
+		t.Fatalf("WriteAt() error = %v", err)
+	}
+	if err := file.Sync(); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+}
+
+func corruptFirstNodeSlotOffset(t *testing.T, path string, pageSize uint32, pageID uint64) {
+	t.Helper()
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	defer file.Close()
+
+	offset := int64(pageID)*int64(pageSize) + 8
+	buf := make([]byte, 2)
+	binary.LittleEndian.PutUint16(buf, uint16(pageSize-1))
 	if _, err := file.WriteAt(buf, offset); err != nil {
 		t.Fatalf("WriteAt() error = %v", err)
 	}

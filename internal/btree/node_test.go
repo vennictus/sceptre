@@ -1,6 +1,7 @@
 package btree
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -189,5 +190,47 @@ func TestAppendLeafCellReturnsNodeFull(t *testing.T) {
 	}
 	if err := node.AppendLeafCell([]byte("c"), []byte("d")); !errors.Is(err, ErrNodeFull) {
 		t.Fatalf("AppendLeafCell() second insert error = %v, want %v", err, ErrNodeFull)
+	}
+}
+
+func TestLeafCellRejectsCorruptOffset(t *testing.T) {
+	t.Parallel()
+
+	page := make([]byte, 64)
+	node, err := NewNode(page, NodeTypeLeaf)
+	if err != nil {
+		t.Fatalf("NewNode() error = %v", err)
+	}
+	if err := node.AppendLeafCell([]byte("a"), []byte("b")); err != nil {
+		t.Fatalf("AppendLeafCell() error = %v", err)
+	}
+
+	node.setSlot(0, uint16(len(page)-1))
+
+	if _, err := node.LeafCell(0); !errors.Is(err, ErrCorruptNode) {
+		t.Fatalf("LeafCell() error = %v, want %v", err, ErrCorruptNode)
+	}
+}
+
+func TestInternalCellRejectsCorruptLength(t *testing.T) {
+	t.Parallel()
+
+	page := make([]byte, 64)
+	node, err := NewNode(page, NodeTypeInternal)
+	if err != nil {
+		t.Fatalf("NewNode() error = %v", err)
+	}
+	if err := node.AppendInternalCell(7, []byte("a")); err != nil {
+		t.Fatalf("AppendInternalCell() error = %v", err)
+	}
+
+	offset, err := node.cellOffset(0)
+	if err != nil {
+		t.Fatalf("cellOffset() error = %v", err)
+	}
+	binary.LittleEndian.PutUint16(page[int(offset)+8:], uint16(len(page)))
+
+	if _, err := node.InternalCell(0); !errors.Is(err, ErrCorruptNode) {
+		t.Fatalf("InternalCell() error = %v, want %v", err, ErrCorruptNode)
 	}
 }

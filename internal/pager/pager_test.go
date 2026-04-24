@@ -50,6 +50,53 @@ func TestOpenInitializesNewFileAndReopens(t *testing.T) {
 	}
 }
 
+func TestWritePageDoesNotPublishPageCountBeforeMeta(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	p := mustOpenPager(t, path)
+	defer p.Close()
+
+	page := make([]byte, p.PageSize())
+	page[0] = 0xAA
+	if err := p.WritePage(2, page); err != nil {
+		t.Fatalf("WritePage() error = %v", err)
+	}
+	if got, want := p.Meta().PageCount, uint64(MetaPageCount); got != want {
+		t.Fatalf("Meta().PageCount = %d, want %d before publish", got, want)
+	}
+
+	meta := p.Meta()
+	meta.PageCount = 3
+	if err := p.PublishMeta(meta); err != nil {
+		t.Fatalf("PublishMeta() error = %v", err)
+	}
+
+	read, err := p.ReadPage(2)
+	if err != nil {
+		t.Fatalf("ReadPage() error = %v", err)
+	}
+	if got, want := read[0], byte(0xAA); got != want {
+		t.Fatalf("ReadPage()[0] = %#x, want %#x", got, want)
+	}
+}
+
+func TestReadPageRejectsShortRead(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	p := mustOpenPager(t, path)
+	defer p.Close()
+
+	meta := p.Meta()
+	meta.PageCount = 3
+	p.meta = meta
+
+	if _, err := p.ReadPage(2); !errors.Is(err, ErrShortPageRead) {
+		t.Fatalf("ReadPage() error = %v, want %v", err, ErrShortPageRead)
+	}
+}
+
 func TestOpenSelectsLatestValidMetaPage(t *testing.T) {
 	t.Parallel()
 
@@ -82,6 +129,28 @@ func TestOpenSelectsLatestValidMetaPage(t *testing.T) {
 	}
 	if got, want := reopened.Meta(), second; got != want {
 		t.Fatalf("Meta() = %+v, want %+v", got, want)
+	}
+}
+
+func TestOpenFallsBackWhenFirstMetaPageSizeIsCorrupt(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	p := mustOpenPager(t, path)
+	mustCorruptMetaByte(t, p, 0, metaPageSizeOffset)
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened := mustReopenPager(t, path)
+	defer reopened.Close()
+
+	if got, want := reopened.ActiveMetaSlot(), 1; got != want {
+		t.Fatalf("ActiveMetaSlot() = %d, want %d", got, want)
+	}
+	if got, want := reopened.Meta().Generation, uint64(1); got != want {
+		t.Fatalf("Generation = %d, want %d", got, want)
 	}
 }
 

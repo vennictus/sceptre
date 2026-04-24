@@ -15,6 +15,7 @@ var (
 	ErrPageNotAllocated  = errors.New("pager: page id not allocated")
 	ErrInvalidPageBuffer = errors.New("pager: page buffer size mismatch")
 	ErrMetaPageSize      = errors.New("pager: meta page size does not match pager")
+	ErrShortPageRead     = errors.New("pager: short page read")
 )
 
 // Options controls how the pager initializes a database file.
@@ -92,8 +93,15 @@ func (p *Pager) ReadPage(pageID uint64) ([]byte, error) {
 	}
 
 	page := make([]byte, p.pageSize)
-	if _, err := p.file.ReadAt(page, p.pageOffset(pageID)); err != nil && err != io.EOF {
+	n, err := p.file.ReadAt(page, p.pageOffset(pageID))
+	if err != nil {
+		if errors.Is(err, io.EOF) && n != len(page) {
+			return nil, fmt.Errorf("%w: page %d", ErrShortPageRead, pageID)
+		}
 		return nil, err
+	}
+	if n != len(page) {
+		return nil, fmt.Errorf("%w: page %d", ErrShortPageRead, pageID)
 	}
 	return page, nil
 }
@@ -109,9 +117,6 @@ func (p *Pager) WritePage(pageID uint64, page []byte) error {
 
 	if _, err := p.file.WriteAt(page, p.pageOffset(pageID)); err != nil {
 		return err
-	}
-	if nextCount := pageID + 1; nextCount > p.meta.PageCount {
-		p.meta.PageCount = nextCount
 	}
 	return nil
 }
@@ -150,7 +155,7 @@ func (p *Pager) open(opts Options) error {
 		return p.initialize(pageSize)
 	}
 
-	return p.load()
+	return p.load(opts)
 }
 
 func (p *Pager) initialize(pageSize uint32) error {
@@ -182,48 +187,51 @@ func (p *Pager) initialize(pageSize uint32) error {
 	return nil
 }
 
-func (p *Pager) load() error {
+func (p *Pager) load(opts Options) error {
 	header := make([]byte, metaHeaderSize)
 	if _, err := p.file.ReadAt(header, 0); err != nil && err != io.EOF {
 		return err
-	}
-
-	pageSize := readPageSize(header)
-	if pageSize < uint32(metaHeaderSize) {
-		return ErrInvalidMetaPageSize
 	}
 
 	info, err := p.file.Stat()
 	if err != nil {
 		return err
 	}
-	if info.Size() < int64(pageSize)*MetaPageCount {
+
+	for _, pageSize := range candidatePageSizes(header, opts.PageSize, info.Size()) {
+		first, err := p.readMetaPage(0, pageSize)
+		firstOK := err == nil
+		second, err := p.readMetaPage(1, pageSize)
+		secondOK := err == nil
+
+		switch {
+		case firstOK && secondOK && second.Generation >= first.Generation:
+			p.pageSize = pageSize
+			p.meta = second
+			p.activeSlot = 1
+			return nil
+		case firstOK && secondOK:
+			p.pageSize = pageSize
+			p.meta = first
+			p.activeSlot = 0
+			return nil
+		case secondOK:
+			p.pageSize = pageSize
+			p.meta = second
+			p.activeSlot = 1
+			return nil
+		case firstOK:
+			p.pageSize = pageSize
+			p.meta = first
+			p.activeSlot = 0
+			return nil
+		}
+	}
+
+	if info.Size() < int64(metaHeaderSize)*MetaPageCount {
 		return ErrFileTooSmall
 	}
-
-	first, err := p.readMetaPage(0, pageSize)
-	firstOK := err == nil
-	second, err := p.readMetaPage(1, pageSize)
-	secondOK := err == nil
-
-	p.pageSize = pageSize
-	switch {
-	case firstOK && secondOK && second.Generation >= first.Generation:
-		p.meta = second
-		p.activeSlot = 1
-	case firstOK && secondOK:
-		p.meta = first
-		p.activeSlot = 0
-	case secondOK:
-		p.meta = second
-		p.activeSlot = 1
-	case firstOK:
-		p.meta = first
-		p.activeSlot = 0
-	default:
-		return ErrNoValidMetaPage
-	}
-	return nil
+	return ErrNoValidMetaPage
 }
 
 func (p *Pager) writeMetaPage(slot int, meta Meta) error {
@@ -256,6 +264,29 @@ func readPageSize(header []byte) uint32 {
 		return 0
 	}
 	return binaryUint32(header[metaPageSizeOffset:])
+}
+
+func candidatePageSizes(header []byte, requested uint32, fileSize int64) []uint32 {
+	seen := make(map[uint32]struct{})
+	var candidates []uint32
+	add := func(pageSize uint32) {
+		if pageSize < uint32(metaHeaderSize) || int64(pageSize)*MetaPageCount > fileSize {
+			return
+		}
+		if _, ok := seen[pageSize]; ok {
+			return
+		}
+		seen[pageSize] = struct{}{}
+		candidates = append(candidates, pageSize)
+	}
+
+	add(requested)
+	add(readPageSize(header))
+	for pageSize := uint32(512); pageSize <= 65536; pageSize *= 2 {
+		add(pageSize)
+	}
+
+	return candidates
 }
 
 func binaryUint32(src []byte) uint32 {

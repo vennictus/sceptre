@@ -34,6 +34,7 @@ var (
 	ErrNodeFull         = errors.New("btree: node is full")
 	ErrCellOutOfRange   = errors.New("btree: cell index out of range")
 	ErrNodeTypeMismatch = errors.New("btree: node type mismatch")
+	ErrCorruptNode      = errors.New("btree: corrupt node")
 )
 
 // Node wraps the raw bytes of a single slotted B+ tree page.
@@ -158,11 +159,20 @@ func (n Node) LeafCell(index int) (LeafCell, error) {
 		return LeafCell{}, err
 	}
 
-	keyLen := binary.LittleEndian.Uint16(n.page[offset:])
-	valLen := binary.LittleEndian.Uint16(n.page[offset+2:])
-	keyStart := offset + leafCellHeaderSize
+	start := int(offset)
+	if start+leafCellHeaderSize > len(n.page) {
+		return LeafCell{}, ErrCorruptNode
+	}
+
+	keyLen := int(binary.LittleEndian.Uint16(n.page[start:]))
+	valLen := int(binary.LittleEndian.Uint16(n.page[start+2:]))
+	keyStart := start + leafCellHeaderSize
 	keyEnd := keyStart + keyLen
 	valEnd := keyEnd + valLen
+	if keyEnd > len(n.page) || valEnd > len(n.page) {
+		return LeafCell{}, ErrCorruptNode
+	}
+
 	return LeafCell{
 		Key:   n.page[keyStart:keyEnd],
 		Value: n.page[keyEnd:valEnd],
@@ -180,21 +190,47 @@ func (n Node) InternalCell(index int) (InternalCell, error) {
 		return InternalCell{}, err
 	}
 
-	keyLen := binary.LittleEndian.Uint16(n.page[offset+8:])
-	keyStart := offset + internalCellHeaderSize
+	start := int(offset)
+	if start+internalCellHeaderSize > len(n.page) {
+		return InternalCell{}, ErrCorruptNode
+	}
+
+	keyLen := int(binary.LittleEndian.Uint16(n.page[start+8:]))
+	keyStart := start + internalCellHeaderSize
 	keyEnd := keyStart + keyLen
+	if keyEnd > len(n.page) {
+		return InternalCell{}, ErrCorruptNode
+	}
+
 	return InternalCell{
-		Child: binary.LittleEndian.Uint64(n.page[offset:]),
+		Child: binary.LittleEndian.Uint64(n.page[start:]),
 		Key:   n.page[keyStart:keyEnd],
 	}, nil
 }
 
 func (n Node) cellOffset(index int) (uint16, error) {
-	if index < 0 || index >= n.Count() {
+	count := n.Count()
+	if index < 0 || index >= count {
 		return 0, ErrCellOutOfRange
 	}
+
+	slotEnd := nodeHeaderSize + count*nodeSlotSize
+	lower := int(n.Lower())
+	upper := int(n.Upper())
+	if slotEnd > len(n.page) || lower < slotEnd || lower > len(n.page) || upper < lower || upper > len(n.page) {
+		return 0, ErrCorruptNode
+	}
+
 	start := nodeHeaderSize + index*nodeSlotSize
-	return binary.LittleEndian.Uint16(n.page[start:]), nil
+	if start+nodeSlotSize > len(n.page) {
+		return 0, ErrCorruptNode
+	}
+
+	offset := binary.LittleEndian.Uint16(n.page[start:])
+	if int(offset) < upper || int(offset) >= len(n.page) {
+		return 0, ErrCorruptNode
+	}
+	return offset, nil
 }
 
 func (n Node) setSlot(index int, offset uint16) {

@@ -138,6 +138,11 @@ func loadReachablePages(p *pager.Pager, pageID uint64, pages map[uint64][]byte) 
 	}
 	switch node.Type() {
 	case btree.NodeTypeLeaf:
+		for i := 0; i < node.Count(); i++ {
+			if _, err := node.LeafCell(i); err != nil {
+				return err
+			}
+		}
 		return nil
 	case btree.NodeTypeInternal:
 		for i := 0; i < node.Count(); i++ {
