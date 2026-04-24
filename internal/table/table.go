@@ -144,17 +144,18 @@ func (db *DB) CreateTable(def TableDef) error {
 	}
 	def.Prefix = prefix
 
-	// Publish the next prefix first. A crash can waste a prefix, but cannot
-	// cause two tables to share one before Chapter 11 transactions exist.
-	if err := db.storeNextTablePrefix(prefix + 1); err != nil {
-		return err
-	}
-
 	encoded, err := encodeTableDef(def)
 	if err != nil {
 		return err
 	}
-	return db.kv.Set(catalogTableKey(def.Name), encoded)
+	nextPrefix, err := encodeNextTablePrefix(prefix + 1)
+	if err != nil {
+		return err
+	}
+	return db.kv.Apply([]kv.Mutation{
+		kv.Put(catalogMetaKey, nextPrefix),
+		kv.Put(catalogTableKey(def.Name), encoded),
+	})
 }
 
 // Table loads a table definition by name.
@@ -189,9 +190,12 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 		return err
 	}
 	index.Prefix = prefix
-	if err := db.storeNextTablePrefix(prefix + 1); err != nil {
+	mutations := make([]kv.Mutation, 0, 2)
+	nextPrefix, err := encodeNextTablePrefix(prefix + 1)
+	if err != nil {
 		return err
 	}
+	mutations = append(mutations, kv.Put(catalogMetaKey, nextPrefix))
 
 	scanner, err := db.Scan(tableName, ScanBounds{})
 	if err != nil {
@@ -206,9 +210,7 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 		if err != nil {
 			return err
 		}
-		if err := db.kv.Set(key, nil); err != nil {
-			return err
-		}
+		mutations = append(mutations, kv.Put(key, nil))
 		if err := scanner.Next(); err != nil {
 			return err
 		}
@@ -219,7 +221,8 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 	if err != nil {
 		return err
 	}
-	return db.kv.Set(catalogTableKey(def.Name), encoded)
+	mutations = append(mutations, kv.Put(catalogTableKey(def.Name), encoded))
+	return db.kv.Apply(mutations)
 }
 
 // Index loads an index definition by name.
@@ -348,11 +351,12 @@ func (db *DB) Delete(tableName string, key Record) (bool, error) {
 	if err != nil || !ok {
 		return ok, err
 	}
-	removed, err := db.kv.Del(rowKey)
-	if err != nil || !removed {
-		return removed, err
+	mutations, err := deleteIndexMutations(def, old)
+	if err != nil {
+		return false, err
 	}
-	if err := db.deleteIndexEntries(def, old); err != nil {
+	mutations = append([]kv.Mutation{kv.Delete(rowKey)}, mutations...)
+	if err := db.kv.Apply(mutations); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -406,15 +410,21 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	if err != nil {
 		return err
 	}
-	if err := db.kv.Set(rowKey, rowValue); err != nil {
-		return err
-	}
+	mutations := make([]kv.Mutation, 0, 1+len(def.Indexes)*2)
 	if exists {
-		if err := db.deleteIndexEntries(def, old); err != nil {
+		deletes, err := deleteIndexMutations(def, old)
+		if err != nil {
 			return err
 		}
+		mutations = append(mutations, deletes...)
 	}
-	return db.putIndexEntries(def, record)
+	mutations = append(mutations, kv.Put(rowKey, rowValue))
+	puts, err := putIndexMutations(def, record)
+	if err != nil {
+		return err
+	}
+	mutations = append(mutations, puts...)
+	return db.kv.Apply(mutations)
 }
 
 func (db *DB) mustTable(name string) (TableDef, error) {
@@ -447,12 +457,20 @@ func (db *DB) nextTablePrefix() (uint32, error) {
 }
 
 func (db *DB) storeNextTablePrefix(next uint32) error {
+	value, err := encodeNextTablePrefix(next)
+	if err != nil {
+		return err
+	}
+	return db.kv.Set(catalogMetaKey, value)
+}
+
+func encodeNextTablePrefix(next uint32) ([]byte, error) {
 	if next == 0 {
-		return ErrInvalidTableDef
+		return nil, ErrInvalidTableDef
 	}
 	var value [4]byte
 	binary.BigEndian.PutUint32(value[:], next)
-	return db.kv.Set(catalogMetaKey, value[:])
+	return value[:], nil
 }
 
 func encodeTableDef(def TableDef) ([]byte, error) {
@@ -679,30 +697,28 @@ func primaryKeyRecord(def TableDef, record Record) Record {
 	return Record{Values: values}
 }
 
-func (db *DB) putIndexEntries(def TableDef, record Record) error {
+func putIndexMutations(def TableDef, record Record) ([]kv.Mutation, error) {
+	mutations := make([]kv.Mutation, 0, len(def.Indexes))
 	for _, index := range def.Indexes {
 		key, err := encodeIndexKey(def, index, record)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := db.kv.Set(key, nil); err != nil {
-			return err
-		}
+		mutations = append(mutations, kv.Put(key, nil))
 	}
-	return nil
+	return mutations, nil
 }
 
-func (db *DB) deleteIndexEntries(def TableDef, record Record) error {
+func deleteIndexMutations(def TableDef, record Record) ([]kv.Mutation, error) {
+	mutations := make([]kv.Mutation, 0, len(def.Indexes))
 	for _, index := range def.Indexes {
 		key, err := encodeIndexKey(def, index, record)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if _, err := db.kv.Del(key); err != nil {
-			return err
-		}
+		mutations = append(mutations, kv.Delete(key))
 	}
-	return nil
+	return mutations, nil
 }
 
 func encodeIndexKey(def TableDef, index IndexDef, record Record) ([]byte, error) {

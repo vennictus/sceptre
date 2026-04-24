@@ -118,6 +118,53 @@ func TestKVDeleteMissingKeyIsStable(t *testing.T) {
 	assertKVValue(t, store, "missing", "", false)
 }
 
+func TestKVApplyCommitsMultipleMutations(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	store := mustOpenKV(t, path)
+
+	if err := store.Apply([]Mutation{
+		Put([]byte("alpha"), []byte("one")),
+		Put([]byte("beta"), []byte("two")),
+	}); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened := mustOpenKV(t, path)
+	defer reopened.Close()
+
+	assertKVValue(t, reopened, "alpha", "one", true)
+	assertKVValue(t, reopened, "beta", "two", true)
+}
+
+func TestKVApplyRollsBackProcessViewOnError(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	store := mustOpenKV(t, path)
+	defer store.Close()
+
+	if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
+		t.Fatalf("Set(alpha) error = %v", err)
+	}
+
+	hugeValue := make([]byte, 1024)
+	err := store.Apply([]Mutation{
+		Put([]byte("alpha"), []byte("uno")),
+		Put([]byte("oversized"), hugeValue),
+	})
+	if err == nil {
+		t.Fatal("Apply() error = nil, want oversized value failure")
+	}
+
+	assertKVValue(t, store, "alpha", "one", true)
+	assertKVValue(t, store, "oversized", "", false)
+}
+
 func TestKVInterruptedPreMetaCommitDoesNotAdvancePageCount(t *testing.T) {
 	stages := []commitStage{
 		commitStagePagesWritten,

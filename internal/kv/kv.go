@@ -21,6 +21,29 @@ type KV struct {
 	commitHook commitHook
 }
 
+// Mutation describes one KV update in an atomic Apply call.
+type Mutation struct {
+	Key    []byte
+	Value  []byte
+	Delete bool
+}
+
+// Put returns a mutation that stores key/value.
+func Put(key, value []byte) Mutation {
+	return Mutation{
+		Key:   cloneBytes(key),
+		Value: cloneBytes(value),
+	}
+}
+
+// Delete returns a mutation that removes key.
+func Delete(key []byte) Mutation {
+	return Mutation{
+		Key:    cloneBytes(key),
+		Delete: true,
+	}
+}
+
 // Open opens the durable pager and reconstructs the in-memory B+ tree state.
 func Open(path string, opts Options) (*KV, error) {
 	p, err := pager.Open(path, pager.Options{PageSize: opts.PageSize})
@@ -71,31 +94,43 @@ func (kv *KV) Get(key []byte) ([]byte, bool, error) {
 
 // Set inserts or replaces a key/value pair and persists the updated tree.
 func (kv *KV) Set(key, value []byte) error {
+	return kv.Apply([]Mutation{Put(key, value)})
+}
+
+// Apply atomically applies all mutations in one durable commit.
+func (kv *KV) Apply(mutations []Mutation) error {
+	if len(mutations) == 0 {
+		return nil
+	}
+
 	previous := kv.tree.Snapshot()
 	previousFree := kv.free.Clone()
 
-	if _, err := kv.tree.Delete(key); err != nil {
-		return kv.rollback(previous, previousFree, err)
-	}
-	if err := kv.tree.Insert(key, value); err != nil {
-		return kv.rollback(previous, previousFree, err)
+	for _, mutation := range mutations {
+		if mutation.Delete {
+			if _, err := kv.tree.Delete(mutation.Key); err != nil {
+				return kv.rollback(previous, previousFree, err)
+			}
+			continue
+		}
+		if _, err := kv.tree.Delete(mutation.Key); err != nil {
+			return kv.rollback(previous, previousFree, err)
+		}
+		if err := kv.tree.Insert(mutation.Key, mutation.Value); err != nil {
+			return kv.rollback(previous, previousFree, err)
+		}
 	}
 	return kv.persistCommitted(previous, previousFree)
 }
 
 // Del removes a key if it exists and persists the updated tree.
 func (kv *KV) Del(key []byte) (bool, error) {
-	previous := kv.tree.Snapshot()
-	previousFree := kv.free.Clone()
-
-	removed, err := kv.tree.Delete(key)
-	if err != nil {
-		return false, kv.rollback(previous, previousFree, err)
-	}
-	if !removed {
+	if _, ok, err := kv.Get(key); err != nil {
+		return false, err
+	} else if !ok {
 		return false, nil
 	}
-	if err := kv.persistCommitted(previous, previousFree); err != nil {
+	if err := kv.Apply([]Mutation{Delete(key)}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -256,4 +291,8 @@ func sortedPageIDs(pages map[uint64][]byte) []uint64 {
 		return pageIDs[i] < pageIDs[j]
 	})
 	return pageIDs
+}
+
+func cloneBytes(src []byte) []byte {
+	return append([]byte(nil), src...)
 }
