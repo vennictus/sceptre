@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ Usage:
   sceptre
   sceptre help
   sceptre sql <db-path> "<statement>"
+  sceptre shell <db-path>
   sceptre explain <db-path> "<statement>"
   sceptre check <db-path>
   sceptre crash-test <db-path>
@@ -36,6 +38,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "sql":
 		return runSQL(args[1:], stdout, stderr)
+	case "shell":
+		return runShell(args[1:], os.Stdin, stdout, stderr)
 	case "explain":
 		return runExplain(args[1:], stdout, stderr)
 	case "check":
@@ -74,6 +78,54 @@ func runSQL(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runShell(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprint(stderr, "sceptre shell: expected <db-path>\n\n")
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	db, err := table.Open(args[0], table.Options{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre shell: open: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	scanner := bufio.NewScanner(stdin)
+	for {
+		fmt.Fprint(stdout, "sceptre> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == ".quit" || line == ".exit" {
+			return 0
+		}
+		if strings.HasPrefix(line, ".") {
+			if err := runShellCommand(db, line, stdout); err != nil {
+				fmt.Fprintf(stderr, "sceptre shell: %v\n", err)
+			}
+			continue
+		}
+
+		result, err := sql.Execute(db, trimSQLTerminator(line))
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre shell: execute: %v\n", err)
+			continue
+		}
+		printSQLResult(stdout, result)
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(stderr, "sceptre shell: read: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func runExplain(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprint(stderr, "sceptre explain: expected <db-path> and <statement>\n\n")
@@ -95,6 +147,42 @@ func runExplain(args []string, stdout, stderr io.Writer) int {
 	}
 	printExplainResult(stdout, plan)
 	return 0
+}
+
+func runShellCommand(db *table.DB, line string, stdout io.Writer) error {
+	switch line {
+	case ".tables":
+		tables, err := db.Tables()
+		if err != nil {
+			return err
+		}
+		for _, def := range tables {
+			fmt.Fprintln(stdout, def.Name)
+		}
+		return nil
+	case ".schema":
+		tables, err := db.Tables()
+		if err != nil {
+			return err
+		}
+		for _, def := range tables {
+			printSchema(stdout, def)
+		}
+		return nil
+	case ".indexes":
+		tables, err := db.Tables()
+		if err != nil {
+			return err
+		}
+		for _, def := range tables {
+			for _, index := range def.Indexes {
+				fmt.Fprintf(stdout, "%s\t%s\t%s\n", index.Name, def.Name, strings.Join(index.Columns, ","))
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown shell command %q", line)
+	}
 }
 
 func runCheck(args []string, stdout, stderr io.Writer) int {
@@ -253,6 +341,33 @@ func printCheckResult(stdout io.Writer, report table.CheckReport) {
 	for _, issue := range report.Issues {
 		fmt.Fprintf(stdout, "issue=%s detail=%s\n", issue.Code, issue.Detail)
 	}
+}
+
+func printSchema(stdout io.Writer, def table.TableDef) {
+	parts := make([]string, 0, len(def.Columns)+1)
+	for _, column := range def.Columns {
+		parts = append(parts, column.Name+" "+formatType(column.Type))
+	}
+	parts = append(parts, "primary key ("+strings.Join(def.PrimaryKey, ", ")+")")
+	fmt.Fprintf(stdout, "create table %s (%s)\n", def.Name, strings.Join(parts, ", "))
+	for _, index := range def.Indexes {
+		fmt.Fprintf(stdout, "create index %s on %s (%s)\n", index.Name, def.Name, strings.Join(index.Columns, ", "))
+	}
+}
+
+func formatType(valueType table.Type) string {
+	switch valueType {
+	case table.TypeInt64:
+		return "int64"
+	case table.TypeBytes:
+		return "bytes"
+	default:
+		return "unknown"
+	}
+}
+
+func trimSQLTerminator(input string) string {
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(input), ";"))
 }
 
 func printCrashReport(stdout io.Writer, report debug.CrashReport) {

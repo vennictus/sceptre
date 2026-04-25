@@ -90,6 +90,14 @@ func (db *DB) Check() (CheckReport, error) {
 	return report, nil
 }
 
+// Tables returns all persisted table definitions sorted by name.
+func (db *DB) Tables() ([]TableDef, error) {
+	if db == nil || db.kv == nil {
+		return nil, ErrTableNotFound
+	}
+	return db.tables()
+}
+
 func (db *DB) tables() ([]TableDef, error) {
 	iter := db.kv.Iterator()
 	if err := iter.SeekGE(catalogTableStart); err != nil {

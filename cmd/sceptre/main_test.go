@@ -23,6 +23,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre sql <db-path>") {
 		t.Fatalf("run() stdout = %q, want sql usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre shell <db-path>") {
+		t.Fatalf("run() stdout = %q, want shell usage", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "sceptre explain <db-path>") {
 		t.Fatalf("run() stdout = %q, want explain usage", stdout.String())
 	}
@@ -73,6 +76,44 @@ func TestRunSQLExecutesStatements(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "1\tAda") {
 		t.Fatalf("run(sql select) stdout = %q, want row", stdout.String())
+	}
+}
+
+func TestRunShellExecutesStatementsAndDotCommands(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	input := strings.NewReader(strings.Join([]string{
+		"create table users (id int64, name bytes, primary key (id));",
+		"create index users_name on users (name);",
+		"insert into users (id, name) values (1, 'Ada');",
+		".tables",
+		".indexes",
+		".schema",
+		"select id, name from users;",
+		".quit",
+	}, "\n"))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runShell([]string{path}, input, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runShell() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("runShell() stderr = %q, want empty", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "users\n") {
+		t.Fatalf("runShell() stdout = %q, want table name", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "users_name\tusers\tname") {
+		t.Fatalf("runShell() stdout = %q, want index listing", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "create table users") {
+		t.Fatalf("runShell() stdout = %q, want schema", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "1\tAda") {
+		t.Fatalf("runShell() stdout = %q, want selected row", stdout.String())
 	}
 }
 
