@@ -23,6 +23,23 @@ func failAfterCommitStage(target commitStage) commitHook {
 	}
 }
 
+func commitHookForStage(stage string) (commitHook, error) {
+	switch commitStage(stage) {
+	case commitStagePagesWritten, commitStagePagesSynced, commitStageMetaPublished:
+		return failAfterCommitStage(commitStage(stage)), nil
+	default:
+		return nil, errors.New("kv: unknown commit stage")
+	}
+}
+
+func CommitStageNames() []string {
+	return []string{
+		string(commitStagePagesWritten),
+		string(commitStagePagesSynced),
+		string(commitStageMetaPublished),
+	}
+}
+
 type commitInterruptedError struct {
 	stage commitStage
 }

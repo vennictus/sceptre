@@ -29,6 +29,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre check <db-path>") {
 		t.Fatalf("run() stdout = %q, want check usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre crash-test <db-path>") {
+		t.Fatalf("run() stdout = %q, want crash-test usage", stdout.String())
+	}
 }
 
 func TestRunRejectsUnknownCommand(t *testing.T) {
@@ -150,6 +153,31 @@ func TestRunCheckPrintsConsistencyReport(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "issues=0") {
 		t.Fatalf("run(check) stdout = %q, want no issues", stdout.String())
+	}
+}
+
+func TestRunCrashTestPrintsRecoveryReport(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"crash-test", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(crash-test) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status=ok") {
+		t.Fatalf("run(crash-test) stdout = %q, want ok status", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "cases=3") {
+		t.Fatalf("run(crash-test) stdout = %q, want three cases", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "case=pages-written") {
+		t.Fatalf("run(crash-test) stdout = %q, want pages-written case", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "case=meta-published") {
+		t.Fatalf("run(crash-test) stdout = %q, want meta-published case", stdout.String())
 	}
 }
 

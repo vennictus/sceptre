@@ -40,7 +40,8 @@ var (
 
 // Options controls the table database's backing KV store.
 type Options struct {
-	PageSize uint32
+	PageSize             uint32
+	FailAfterCommitStage string
 }
 
 // Column defines one named table column.
@@ -85,7 +86,10 @@ type DB struct {
 
 // Open opens a table database backed by the durable KV layer.
 func Open(path string, opts Options) (*DB, error) {
-	store, err := kv.Open(path, kv.Options{PageSize: opts.PageSize})
+	store, err := kv.Open(path, kv.Options{
+		PageSize:             opts.PageSize,
+		FailAfterCommitStage: opts.FailAfterCommitStage,
+	})
 	if err != nil {
 		return nil, err
 	}

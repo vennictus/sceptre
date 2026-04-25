@@ -10,7 +10,8 @@ import (
 
 // Options controls how the KV layer initializes its backing pager.
 type Options struct {
-	PageSize uint32
+	PageSize             uint32
+	FailAfterCommitStage string
 }
 
 // KV ties the B+ tree state to the durable pager file.
@@ -62,11 +63,20 @@ func Open(path string, opts Options) (*KV, error) {
 		return nil, err
 	}
 
-	return &KV{
+	store := &KV{
 		pager: p,
 		tree:  tree,
 		free:  free,
-	}, nil
+	}
+	if opts.FailAfterCommitStage != "" {
+		hook, err := commitHookForStage(opts.FailAfterCommitStage)
+		if err != nil {
+			p.Close()
+			return nil, err
+		}
+		store.commitHook = hook
+	}
+	return store, nil
 }
 
 // Close closes the underlying pager file.

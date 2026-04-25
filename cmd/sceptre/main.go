@@ -18,6 +18,7 @@ Usage:
   sceptre sql <db-path> "<statement>"
   sceptre explain <db-path> "<statement>"
   sceptre check <db-path>
+  sceptre crash-test <db-path>
   sceptre inspect meta <db-path>
   sceptre inspect tree <db-path>
   sceptre inspect freelist <db-path>
@@ -39,6 +40,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runExplain(args[1:], stdout, stderr)
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
+	case "crash-test":
+		return runCrashTest(args[1:], stdout, stderr)
 	case "inspect":
 		return runInspect(args[1:], stdout, stderr)
 	default:
@@ -114,6 +117,25 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	printCheckResult(stdout, report)
+	if !report.OK() {
+		return 1
+	}
+	return 0
+}
+
+func runCrashTest(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprint(stderr, "sceptre crash-test: expected <db-path>\n\n")
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	report, err := debug.CrashTest(args[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre crash-test: %v\n", err)
+		return 1
+	}
+	printCrashReport(stdout, report)
 	if !report.OK() {
 		return 1
 	}
@@ -230,6 +252,29 @@ func printCheckResult(stdout io.Writer, report table.CheckReport) {
 	fmt.Fprintf(stdout, "issues=%d\n", len(report.Issues))
 	for _, issue := range report.Issues {
 		fmt.Fprintf(stdout, "issue=%s detail=%s\n", issue.Code, issue.Detail)
+	}
+}
+
+func printCrashReport(stdout io.Writer, report debug.CrashReport) {
+	status := "ok"
+	if !report.OK() {
+		status = "failed"
+	}
+	fmt.Fprintf(stdout, "status=%s\n", status)
+	fmt.Fprintf(stdout, "work_dir=%s\n", report.WorkDir)
+	fmt.Fprintf(stdout, "cases=%d\n", len(report.Cases))
+	for _, crashCase := range report.Cases {
+		fmt.Fprintf(
+			stdout,
+			"case=%s recovered=%t check_ok=%t expected_new=%t observed_new=%t issues=%d path=%s\n",
+			crashCase.Stage,
+			crashCase.Recovered,
+			crashCase.CheckOK,
+			crashCase.ExpectedNew,
+			crashCase.ObservedNew,
+			crashCase.Issues,
+			crashCase.Path,
+		)
 	}
 }
 
