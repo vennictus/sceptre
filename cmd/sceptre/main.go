@@ -20,6 +20,7 @@ Usage:
   sceptre sql <db-path> "<statement>"
   sceptre shell <db-path>
   sceptre explain <db-path> "<statement>"
+  sceptre explain-analyze <db-path> "<select>"
   sceptre check <db-path>
   sceptre crash-test <db-path>
   sceptre inspect meta <db-path>
@@ -47,6 +48,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runShell(args[1:], os.Stdin, stdout, stderr)
 	case "explain":
 		return runExplain(args[1:], stdout, stderr)
+	case "explain-analyze":
+		return runExplainAnalyze(args[1:], stdout, stderr)
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
 	case "crash-test":
@@ -154,6 +157,29 @@ func runExplain(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	printExplainResult(stdout, plan)
+	return 0
+}
+
+func runExplainAnalyze(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprint(stderr, "sceptre explain-analyze: expected <db-path> and <select>\n\n")
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	db, err := table.Open(args[0], table.Options{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre explain-analyze: open: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	report, err := sql.Analyze(db, strings.Join(args[1:], " "))
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre explain-analyze: %v\n", err)
+		return 1
+	}
+	printAnalyzeReport(stdout, report)
 	return 0
 }
 
@@ -449,6 +475,25 @@ func printExplainResult(stdout io.Writer, plan sql.Plan) {
 		fmt.Fprintf(stdout, "offset=%d\n", *plan.Offset)
 	}
 	fmt.Fprintf(stdout, "residual=%s\n", sql.FormatExpr(plan.Residual))
+}
+
+func printAnalyzeReport(stdout io.Writer, report sql.AnalyzeReport) {
+	printExplainResult(stdout, report.Plan)
+	fmt.Fprintf(stdout, "rows_scanned=%d\n", report.RowsScanned)
+	fmt.Fprintf(stdout, "rows_matched=%d\n", report.RowsMatched)
+	fmt.Fprintf(stdout, "rows_returned=%d\n", report.RowsReturned)
+	fmt.Fprintf(stdout, "total_time=%s\n", report.TotalTime)
+
+	rows := make([][]string, 0, len(report.Stages))
+	for _, stage := range report.Stages {
+		rows = append(rows, []string{
+			stage.Name,
+			fmt.Sprintf("%d", stage.RowsIn),
+			fmt.Sprintf("%d", stage.RowsOut),
+			stage.Duration.String(),
+		})
+	}
+	printStringTable(stdout, []string{"stage", "rows_in", "rows_out", "time"}, rows)
 }
 
 func printCheckResult(stdout io.Writer, report table.CheckReport) {

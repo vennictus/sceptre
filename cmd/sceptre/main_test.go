@@ -29,6 +29,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre explain <db-path>") {
 		t.Fatalf("run() stdout = %q, want explain usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre explain-analyze <db-path>") {
+		t.Fatalf("run() stdout = %q, want explain-analyze usage", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "sceptre check <db-path>") {
 		t.Fatalf("run() stdout = %q, want check usage", stdout.String())
 	}
@@ -259,6 +262,38 @@ func TestRunExplainPrintsPlan(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "residual=name = 'Ada'") {
 		t.Fatalf("run(explain) stdout = %q, want residual", stdout.String())
+	}
+}
+
+func TestRunExplainAnalyzePrintsExecutionCounters(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	runOK(t, []string{"sql", path, "create table users (id int64, name bytes, age int64, primary key (id))"})
+	runOK(t, []string{"sql", path, "create index users_age on users (age)"})
+	runOK(t, []string{"sql", path, "insert into users (id, name, age) values (1, 'Ada', 31)"})
+	runOK(t, []string{"sql", path, "insert into users (id, name, age) values (2, 'Grace', 40)"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"explain-analyze", path, "select id, name from users where age = 31"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(explain-analyze) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "access=secondary_index_lookup") {
+		t.Fatalf("run(explain-analyze) stdout = %q, want access path", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "rows_scanned=1") {
+		t.Fatalf("run(explain-analyze) stdout = %q, want scanned counter", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "rows_matched=1") {
+		t.Fatalf("run(explain-analyze) stdout = %q, want matched counter", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "rows_returned=1") {
+		t.Fatalf("run(explain-analyze) stdout = %q, want returned counter", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "filter_project") {
+		t.Fatalf("run(explain-analyze) stdout = %q, want stage table", stdout.String())
 	}
 }
 
