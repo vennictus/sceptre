@@ -31,6 +31,7 @@ Sceptre currently supports:
 - `SELECT`
 - `UPDATE`
 - `DELETE`
+- interactive SQL shell
 - primary-key lookups and scans
 - secondary-index lookups
 - atomic KV apply operations
@@ -52,6 +53,7 @@ go run ./cmd/sceptre sql app.db "create table users (id int64, name bytes, age i
 go run ./cmd/sceptre sql app.db "create index users_age on users (age)"
 go run ./cmd/sceptre sql app.db "insert into users (id, name, age) values (1, 'Ada', 31)"
 go run ./cmd/sceptre sql app.db "select id, name from users where age = 31"
+go run ./cmd/sceptre shell app.db
 ```
 
 Inspect and validate it:
@@ -71,6 +73,7 @@ go run ./cmd/sceptre crash-test scratch.db
 sceptre
 sceptre help
 sceptre sql <db-path> "<statement>"
+sceptre shell <db-path>
 sceptre explain <db-path> "<statement>"
 sceptre check <db-path>
 sceptre crash-test <db-path>
