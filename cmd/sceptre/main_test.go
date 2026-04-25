@@ -145,6 +145,54 @@ func TestRunInspectMetaAndTree(t *testing.T) {
 	}
 }
 
+func TestRunInspectTableIndexAndPages(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	runOK(t, []string{"sql", path, "create table users (id int64, name bytes, age int64, primary key (id))"})
+	runOK(t, []string{"sql", path, "create index users_age on users (age)"})
+	runOK(t, []string{"sql", path, "insert into users (id, name, age) values (1, 'Ada', 31)"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"inspect", "table", path, "users"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(inspect table) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "table=users") {
+		t.Fatalf("run(inspect table) stdout = %q, want table name", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "row=id=1,name=Ada,age=31") {
+		t.Fatalf("run(inspect table) stdout = %q, want row", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"inspect", "index", path, "users_age"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(inspect index) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "index=users_age") {
+		t.Fatalf("run(inspect index) stdout = %q, want index name", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "entry=age=31 primary_key=id=1") {
+		t.Fatalf("run(inspect index) stdout = %q, want index entry", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"inspect", "pages", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(inspect pages) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "page_count=") {
+		t.Fatalf("run(inspect pages) stdout = %q, want page count", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "kind=meta_active") {
+		t.Fatalf("run(inspect pages) stdout = %q, want active meta page", stdout.String())
+	}
+}
+
 func TestRunExplainPrintsPlan(t *testing.T) {
 	t.Parallel()
 

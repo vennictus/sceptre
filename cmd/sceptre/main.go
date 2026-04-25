@@ -8,6 +8,7 @@ import (
 	"sceptre/internal/debug"
 	"sceptre/internal/sql"
 	"sceptre/internal/table"
+	"sort"
 	"strings"
 )
 
@@ -24,6 +25,9 @@ Usage:
   sceptre inspect meta <db-path>
   sceptre inspect tree <db-path>
   sceptre inspect freelist <db-path>
+  sceptre inspect table <db-path> <table>
+  sceptre inspect index <db-path> <index>
+  sceptre inspect pages <db-path>
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -231,14 +235,19 @@ func runCrashTest(args []string, stdout, stderr io.Writer) int {
 }
 
 func runInspect(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 2 {
-		fmt.Fprint(stderr, "sceptre inspect: expected <meta|tree|freelist> and <db-path>\n\n")
+	if len(args) < 2 {
+		fmt.Fprint(stderr, "sceptre inspect: expected target and <db-path>\n\n")
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
 
 	switch args[0] {
 	case "meta":
+		if len(args) != 2 {
+			fmt.Fprint(stderr, "sceptre inspect meta: expected <db-path>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
 		info, err := debug.InspectMeta(args[1])
 		if err != nil {
 			fmt.Fprintf(stderr, "sceptre inspect meta: %v\n", err)
@@ -253,6 +262,11 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "active_meta_slot=%d\n", info.ActiveSlot)
 		return 0
 	case "tree":
+		if len(args) != 2 {
+			fmt.Fprint(stderr, "sceptre inspect tree: expected <db-path>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
 		info, err := debug.InspectTree(args[1])
 		if err != nil {
 			fmt.Fprintf(stderr, "sceptre inspect tree: %v\n", err)
@@ -266,6 +280,11 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "freelist":
+		if len(args) != 2 {
+			fmt.Fprint(stderr, "sceptre inspect freelist: expected <db-path>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
 		info, err := debug.InspectFreeList(args[1])
 		if err != nil {
 			fmt.Fprintf(stderr, "sceptre inspect freelist: %v\n", err)
@@ -275,10 +294,84 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "freelist_pages=%v\n", info.PageIDs)
 		fmt.Fprintf(stdout, "free_pages=%v\n", info.FreePages)
 		return 0
+	case "table":
+		if len(args) != 3 {
+			fmt.Fprint(stderr, "sceptre inspect table: expected <db-path> and <table>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		info, err := debug.InspectTable(args[1], args[2])
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre inspect table: %v\n", err)
+			return 1
+		}
+		printTableInfo(stdout, info)
+		return 0
+	case "index":
+		if len(args) != 3 {
+			fmt.Fprint(stderr, "sceptre inspect index: expected <db-path> and <index>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		info, err := debug.InspectIndex(args[1], args[2])
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre inspect index: %v\n", err)
+			return 1
+		}
+		printIndexInfo(stdout, info)
+		return 0
+	case "pages":
+		if len(args) != 2 {
+			fmt.Fprint(stderr, "sceptre inspect pages: expected <db-path>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		info, err := debug.InspectPages(args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre inspect pages: %v\n", err)
+			return 1
+		}
+		printPagesInfo(stdout, info)
+		return 0
 	default:
 		fmt.Fprintf(stderr, "sceptre inspect: unknown target %q\n\n", args[0])
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+}
+
+func printTableInfo(stdout io.Writer, info debug.TableInfo) {
+	fmt.Fprintf(stdout, "table=%s\n", info.Name)
+	fmt.Fprintf(stdout, "columns=%d\n", len(info.Columns))
+	for _, column := range info.Columns {
+		fmt.Fprintf(stdout, "column=%s type=%s\n", column.Name, formatType(column.Type))
+	}
+	fmt.Fprintf(stdout, "primary_key=%s\n", strings.Join(info.PrimaryKey, ","))
+	fmt.Fprintf(stdout, "indexes=%d\n", len(info.Indexes))
+	for _, index := range info.Indexes {
+		fmt.Fprintf(stdout, "index=%s columns=%s\n", index.Name, strings.Join(index.Columns, ","))
+	}
+	fmt.Fprintf(stdout, "rows=%d\n", len(info.Rows))
+	for _, row := range info.Rows {
+		fmt.Fprintf(stdout, "row=%s\n", formatRecord(info.Columns, row))
+	}
+}
+
+func printIndexInfo(stdout io.Writer, info debug.IndexInfo) {
+	fmt.Fprintf(stdout, "index=%s\n", info.Name)
+	fmt.Fprintf(stdout, "table=%s\n", info.Table)
+	fmt.Fprintf(stdout, "columns=%s\n", strings.Join(info.Columns, ","))
+	fmt.Fprintf(stdout, "entries=%d\n", len(info.Entries))
+	for _, entry := range info.Entries {
+		fmt.Fprintf(stdout, "entry=%s primary_key=%s\n", formatRecordNames(info.Columns, entry.Values), formatRecordNames(recordNames(entry.PrimaryKey), entry.PrimaryKey))
+	}
+}
+
+func printPagesInfo(stdout io.Writer, info debug.PagesInfo) {
+	fmt.Fprintf(stdout, "page_size=%d\n", info.PageSize)
+	fmt.Fprintf(stdout, "page_count=%d\n", info.PageCount)
+	for _, page := range info.Pages {
+		fmt.Fprintf(stdout, "page=%d kind=%s cells=%d free_bytes=%d\n", page.ID, page.Kind, page.Cells, page.FreeBytes)
 	}
 }
 
@@ -402,6 +495,35 @@ func formatValue(value table.Value) string {
 	default:
 		return "<invalid>"
 	}
+}
+
+func formatRecord(columns []table.Column, record table.Record) string {
+	names := make([]string, 0, len(columns))
+	for _, column := range columns {
+		names = append(names, column.Name)
+	}
+	return formatRecordNames(names, record)
+}
+
+func formatRecordNames(names []string, record table.Record) string {
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		value, ok := record.Values[name]
+		if !ok {
+			continue
+		}
+		parts = append(parts, name+"="+formatValue(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func recordNames(record table.Record) []string {
+	names := make([]string, 0, len(record.Values))
+	for name := range record.Values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func formatBytes(value []byte) string {
