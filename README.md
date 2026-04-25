@@ -37,6 +37,7 @@ Sceptre currently supports:
 - transaction commit/abort and optimistic conflict detection
 - storage inspection commands
 - `EXPLAIN` for query access paths
+- `EXPLAIN ANALYZE`-style execution counters through `explain-analyze`
 - `check` for table/index consistency validation
 - `crash-test` for commit-boundary recovery verification
 
@@ -59,12 +60,14 @@ Inspect and validate it:
 
 ```powershell
 go run ./cmd/sceptre explain app.db "select * from users where age = 31"
+go run ./cmd/sceptre explain-analyze app.db "select * from users where age = 31"
 go run ./cmd/sceptre inspect meta app.db
 go run ./cmd/sceptre inspect tree app.db
 go run ./cmd/sceptre inspect freelist app.db
 go run ./cmd/sceptre inspect table app.db users
 go run ./cmd/sceptre inspect index app.db users_age
 go run ./cmd/sceptre inspect pages app.db
+go run ./cmd/sceptre inspect page app.db 0
 go run ./cmd/sceptre check app.db
 go run ./cmd/sceptre crash-test scratch.db
 ```
@@ -79,6 +82,7 @@ sceptre help
 sceptre sql <db-path> "<statement>"
 sceptre shell <db-path>
 sceptre explain <db-path> "<statement>"
+sceptre explain-analyze <db-path> "<select>"
 sceptre check <db-path>
 sceptre crash-test <db-path>
 sceptre inspect meta <db-path>
@@ -87,6 +91,7 @@ sceptre inspect freelist <db-path>
 sceptre inspect table <db-path> <table>
 sceptre inspect index <db-path> <index>
 sceptre inspect pages <db-path>
+sceptre inspect page <db-path> <page-id>
 ```
 
 `crash-test` creates a scratch directory beside the provided path and runs
@@ -138,7 +143,9 @@ Important debugging surfaces:
 - `inspect table` shows schema, indexes, and rows for one table.
 - `inspect index` shows derived index entries and primary-key targets.
 - `inspect pages` shows the page inventory and B+ tree page summaries.
+- `inspect page` decodes one meta, freelist, or B+ tree page.
 - `explain` reports the chosen query access path and residual filters.
+- `explain-analyze` reports the chosen access path with row counters and stage timings.
 - `check` validates table rows and secondary-index entries.
 - `crash-test` interrupts commits at known stages and verifies recovery.
 

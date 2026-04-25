@@ -21,17 +21,19 @@ go run ./cmd/sceptre sql app.db "select id, name from users where age = 31"
 Expected shape:
 
 ```text
-id	name
-1	Ada
+id  name
+--  ----
+1   Ada
 ```
 
-## Explain The Query
+## Explain And Analyze The Query
 
 ```powershell
 go run ./cmd/sceptre explain app.db "select * from users where age = 31"
+go run ./cmd/sceptre explain-analyze app.db "select * from users where age = 31"
 ```
 
-Expected shape:
+`explain` shows the planned access path:
 
 ```text
 statement=select
@@ -42,6 +44,18 @@ lookup=age = 31
 residual=none
 ```
 
+`explain-analyze` runs the query and adds actual counters:
+
+```text
+rows_scanned=1
+rows_matched=1
+rows_returned=1
+stage                   rows_in  rows_out  time
+-----                   -------  --------  ----
+secondary_index_lookup  0        1         ...
+filter_project          1        1         ...
+```
+
 ## Inspect The Database
 
 ```powershell
@@ -49,11 +63,13 @@ go run ./cmd/sceptre inspect schema app.db
 go run ./cmd/sceptre inspect table app.db users
 go run ./cmd/sceptre inspect index app.db users_age
 go run ./cmd/sceptre inspect pages app.db
+go run ./cmd/sceptre inspect page app.db 0
 go run ./cmd/sceptre inspect freelist app.db
 ```
 
 These commands expose schema, rows, derived index entries, page inventory, and
-freelist state.
+freelist state. Use `inspect pages` to find interesting page IDs, then
+`inspect page` to decode one meta, freelist, or B+ tree page.
 
 ## Check Consistency
 

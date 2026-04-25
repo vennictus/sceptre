@@ -41,6 +41,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre inspect schema <db-path>") {
 		t.Fatalf("run() stdout = %q, want inspect schema usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre inspect page <db-path>") {
+		t.Fatalf("run() stdout = %q, want inspect page usage", stdout.String())
+	}
 }
 
 func TestRunRejectsUnknownCommand(t *testing.T) {
@@ -203,6 +206,19 @@ func TestRunInspectTableIndexAndPages(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "kind=meta_active") {
 		t.Fatalf("run(inspect pages) stdout = %q, want active meta page", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"inspect", "page", path, "0"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(inspect page) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "page=0") {
+		t.Fatalf("run(inspect page) stdout = %q, want page id", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "root_page=") {
+		t.Fatalf("run(inspect page) stdout = %q, want decoded meta", stdout.String())
 	}
 
 	runOK(t, []string{"sql", path, "update users set age = 32 where id = 1"})

@@ -9,6 +9,7 @@ import (
 	"sceptre/internal/sql"
 	"sceptre/internal/table"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -30,6 +31,7 @@ Usage:
   sceptre inspect table <db-path> <table>
   sceptre inspect index <db-path> <index>
   sceptre inspect pages <db-path>
+  sceptre inspect page <db-path> <page-id>
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -389,6 +391,24 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		}
 		printPagesInfo(stdout, info)
 		return 0
+	case "page":
+		if len(args) != 3 {
+			fmt.Fprint(stderr, "sceptre inspect page: expected <db-path> and <page-id>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		pageID, err := strconv.ParseUint(args[2], 10, 64)
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre inspect page: invalid page id %q\n", args[2])
+			return 2
+		}
+		info, err := debug.InspectPage(args[1], pageID)
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre inspect page: %v\n", err)
+			return 1
+		}
+		printPageDetail(stdout, info)
+		return 0
 	default:
 		fmt.Fprintf(stderr, "sceptre inspect: unknown target %q\n\n", args[0])
 		fmt.Fprint(stderr, usage)
@@ -428,6 +448,41 @@ func printPagesInfo(stdout io.Writer, info debug.PagesInfo) {
 	fmt.Fprintf(stdout, "page_count=%d\n", info.PageCount)
 	for _, page := range info.Pages {
 		fmt.Fprintf(stdout, "page=%d kind=%s cells=%d free_bytes=%d\n", page.ID, page.Kind, page.Cells, page.FreeBytes)
+	}
+}
+
+func printPageDetail(stdout io.Writer, info debug.PageDetailInfo) {
+	fmt.Fprintf(stdout, "page=%d\n", info.ID)
+	fmt.Fprintf(stdout, "kind=%s\n", info.Kind)
+	fmt.Fprintf(stdout, "page_size=%d\n", info.PageSize)
+
+	if info.Meta != nil {
+		fmt.Fprintf(stdout, "root_page=%d\n", info.Meta.RootPage)
+		fmt.Fprintf(stdout, "freelist_page=%d\n", info.Meta.FreeListPage)
+		fmt.Fprintf(stdout, "page_count=%d\n", info.Meta.PageCount)
+		fmt.Fprintf(stdout, "generation=%d\n", info.Meta.Generation)
+		fmt.Fprintf(stdout, "active_meta_slot=%d\n", info.Meta.ActiveSlot)
+		return
+	}
+
+	if info.Kind == "freelist_head" || info.Kind == "freelist" {
+		fmt.Fprintf(stdout, "next_page=%d\n", info.NextPage)
+		fmt.Fprintf(stdout, "free_pages=%v\n", info.FreePages)
+		return
+	}
+
+	if info.Kind == "btree_leaf" || info.Kind == "btree_internal" {
+		fmt.Fprintf(stdout, "cells=%d\n", info.Cells)
+		fmt.Fprintf(stdout, "lower=%d\n", info.Lower)
+		fmt.Fprintf(stdout, "upper=%d\n", info.Upper)
+		fmt.Fprintf(stdout, "free_bytes=%d\n", info.FreeBytes)
+		for _, cell := range info.BTreeCells {
+			if info.Kind == "btree_internal" {
+				fmt.Fprintf(stdout, "cell=%d child=%d key=%s\n", cell.Index, cell.Child, formatBytes(cell.Key))
+				continue
+			}
+			fmt.Fprintf(stdout, "cell=%d key=%s value=%s\n", cell.Index, formatBytes(cell.Key), formatBytes(cell.Value))
+		}
 	}
 }
 

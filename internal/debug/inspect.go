@@ -69,6 +69,27 @@ type PagesInfo struct {
 	Pages     []PageInfo
 }
 
+type PageCellInfo struct {
+	Index int
+	Child uint64
+	Key   []byte
+	Value []byte
+}
+
+type PageDetailInfo struct {
+	ID         uint64
+	Kind       string
+	PageSize   uint32
+	Cells      int
+	FreeBytes  int
+	Lower      uint16
+	Upper      uint16
+	Meta       *MetaInfo
+	NextPage   uint64
+	FreePages  []uint64
+	BTreeCells []PageCellInfo
+}
+
 // InspectMeta returns the active durable meta-page state.
 func InspectMeta(path string) (MetaInfo, error) {
 	p, err := pager.Open(path, pager.Options{})
@@ -259,6 +280,92 @@ func InspectPages(path string) (PagesInfo, error) {
 	return info, nil
 }
 
+func InspectPage(path string, pageID uint64) (PageDetailInfo, error) {
+	p, err := pager.Open(path, pager.Options{})
+	if err != nil {
+		return PageDetailInfo{}, err
+	}
+	defer p.Close()
+
+	meta := p.Meta()
+	if pageID >= meta.PageCount {
+		return PageDetailInfo{}, fmt.Errorf("page %d out of range", pageID)
+	}
+
+	pageKind, err := classifyPage(p, pageID)
+	if err != nil {
+		return PageDetailInfo{}, err
+	}
+	info := PageDetailInfo{
+		ID:       pageID,
+		Kind:     pageKind.Kind,
+		PageSize: meta.PageSize,
+	}
+
+	page, err := p.ReadPage(pageID)
+	if err != nil {
+		return PageDetailInfo{}, err
+	}
+
+	switch pageKind.Kind {
+	case "meta", "meta_active":
+		decoded, err := pager.DecodeMeta(page)
+		if err != nil {
+			return PageDetailInfo{}, err
+		}
+		info.Meta = &MetaInfo{
+			Path:         p.Path(),
+			PageSize:     decoded.PageSize,
+			RootPage:     decoded.RootPage,
+			FreeListPage: decoded.FreeListPage,
+			PageCount:    decoded.PageCount,
+			Generation:   decoded.Generation,
+			ActiveSlot:   p.ActiveMetaSlot(),
+		}
+	case "freelist_head", "freelist":
+		nextPage, freePages, err := freelist.DecodePage(page)
+		if err != nil {
+			return PageDetailInfo{}, err
+		}
+		info.NextPage = nextPage
+		info.FreePages = append([]uint64(nil), freePages...)
+	case "btree_leaf", "btree_internal":
+		node, err := btree.WrapNode(page)
+		if err != nil {
+			return PageDetailInfo{}, err
+		}
+		info.Cells = node.Count()
+		info.FreeBytes = node.FreeSpace()
+		info.Lower = node.Lower()
+		info.Upper = node.Upper()
+		for i := 0; i < node.Count(); i++ {
+			if node.Type() == btree.NodeTypeLeaf {
+				cell, err := node.LeafCell(i)
+				if err != nil {
+					return PageDetailInfo{}, err
+				}
+				info.BTreeCells = append(info.BTreeCells, PageCellInfo{
+					Index: i,
+					Key:   cloneBytes(cell.Key),
+					Value: cloneBytes(cell.Value),
+				})
+				continue
+			}
+			cell, err := node.InternalCell(i)
+			if err != nil {
+				return PageDetailInfo{}, err
+			}
+			info.BTreeCells = append(info.BTreeCells, PageCellInfo{
+				Index: i,
+				Child: cell.Child,
+				Key:   cloneBytes(cell.Key),
+			})
+		}
+	}
+
+	return info, nil
+}
+
 // InspectFreeList returns the current persisted freelist inventory.
 func InspectFreeList(path string) (FreeListInfo, error) {
 	p, err := pager.Open(path, pager.Options{})
@@ -290,6 +397,43 @@ func inspectBTreePage(pageID uint64, page []byte) PageInfo {
 		return PageInfo{ID: pageID, Kind: "btree_internal", Cells: node.Count(), FreeBytes: node.FreeSpace()}
 	default:
 		return PageInfo{ID: pageID, Kind: fmt.Sprintf("unknown_type_%d", node.Type())}
+	}
+}
+
+func classifyPage(p *pager.Pager, pageID uint64) (PageInfo, error) {
+	meta := p.Meta()
+	free, err := freelist.Load(p, meta.FreeListPage)
+	if err != nil {
+		return PageInfo{}, err
+	}
+	freelistPages := make(map[uint64]struct{}, len(free.PageIDs))
+	for _, pageID := range free.PageIDs {
+		freelistPages[pageID] = struct{}{}
+	}
+	freePages := make(map[uint64]struct{}, len(free.FreePages))
+	for _, pageID := range free.FreePages {
+		freePages[pageID] = struct{}{}
+	}
+
+	switch {
+	case pageID < pager.MetaPageCount:
+		kind := "meta"
+		if int(pageID) == p.ActiveMetaSlot() {
+			kind = "meta_active"
+		}
+		return PageInfo{ID: pageID, Kind: kind}, nil
+	case pageID == meta.FreeListPage:
+		return PageInfo{ID: pageID, Kind: "freelist_head"}, nil
+	case hasPage(freelistPages, pageID):
+		return PageInfo{ID: pageID, Kind: "freelist"}, nil
+	case hasPage(freePages, pageID):
+		return PageInfo{ID: pageID, Kind: "free_page"}, nil
+	default:
+		page, err := p.ReadPage(pageID)
+		if err != nil {
+			return PageInfo{}, err
+		}
+		return inspectBTreePage(pageID, page), nil
 	}
 }
 
