@@ -302,27 +302,22 @@ func InspectPage(path string, pageID uint64) (PageDetailInfo, error) {
 		PageSize: meta.PageSize,
 	}
 
-	page, err := p.ReadPage(pageID)
-	if err != nil {
-		return PageDetailInfo{}, err
-	}
-
 	switch pageKind.Kind {
 	case "meta", "meta_active":
-		decoded, err := pager.DecodeMeta(page)
-		if err != nil {
-			return PageDetailInfo{}, err
-		}
 		info.Meta = &MetaInfo{
 			Path:         p.Path(),
-			PageSize:     decoded.PageSize,
-			RootPage:     decoded.RootPage,
-			FreeListPage: decoded.FreeListPage,
-			PageCount:    decoded.PageCount,
-			Generation:   decoded.Generation,
+			PageSize:     meta.PageSize,
+			RootPage:     meta.RootPage,
+			FreeListPage: meta.FreeListPage,
+			PageCount:    meta.PageCount,
+			Generation:   meta.Generation,
 			ActiveSlot:   p.ActiveMetaSlot(),
 		}
 	case "freelist_head", "freelist":
+		page, err := p.ReadPage(pageID)
+		if err != nil {
+			return PageDetailInfo{}, err
+		}
 		nextPage, freePages, err := freelist.DecodePage(page)
 		if err != nil {
 			return PageDetailInfo{}, err
@@ -330,6 +325,10 @@ func InspectPage(path string, pageID uint64) (PageDetailInfo, error) {
 		info.NextPage = nextPage
 		info.FreePages = append([]uint64(nil), freePages...)
 	case "btree_leaf", "btree_internal":
+		page, err := p.ReadPage(pageID)
+		if err != nil {
+			return PageDetailInfo{}, err
+		}
 		node, err := btree.WrapNode(page)
 		if err != nil {
 			return PageDetailInfo{}, err
