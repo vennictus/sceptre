@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sceptre/internal/btree"
+	"sceptre/internal/freelist"
+	"sceptre/internal/pager"
 	"sort"
 	"strings"
 )
@@ -48,6 +51,7 @@ func (db *DB) Check() (CheckReport, error) {
 	expectedIndexKeys := make(map[string]string)
 	seenIndexKeys := make(map[string]struct{})
 
+	report.Issues = append(report.Issues, checkPrefixUniqueness(defs)...)
 	nextPrefix, hasNextPrefix, err := db.loadNextTablePrefix()
 	if err != nil {
 		report.add("catalog_meta_invalid", err.Error())
@@ -79,6 +83,9 @@ func (db *DB) Check() (CheckReport, error) {
 	}
 
 	if err := db.checkRawKeys(defs, prefixes, expectedIndexKeys, seenIndexKeys, &report); err != nil {
+		return CheckReport{}, err
+	}
+	if err := db.checkStoragePages(&report); err != nil {
 		return CheckReport{}, err
 	}
 	for key, detail := range expectedIndexKeys {
@@ -214,6 +221,110 @@ func (db *DB) checkRawKeys(defs []TableDef, prefixes prefixSet, expectedIndexKey
 	return nil
 }
 
+func (db *DB) checkStoragePages(report *CheckReport) error {
+	p := db.kv.Pager()
+	meta := p.Meta()
+	snapshot := db.kv.Tree().Snapshot()
+	reachable := make(map[uint64]struct{}, len(snapshot.Pages))
+	for pageID := range snapshot.Pages {
+		reachable[pageID] = struct{}{}
+	}
+
+	if snapshot.Root != 0 {
+		if _, ok := snapshot.Pages[snapshot.Root]; !ok {
+			report.add("missing_root_page", fmt.Sprintf("root page %d is not loaded in tree snapshot", snapshot.Root))
+		}
+	}
+	for pageID, page := range snapshot.Pages {
+		if pageID < pager.MetaPageCount || pageID >= meta.PageCount {
+			report.add("tree_page_out_of_range", fmt.Sprintf("tree page %d outside page count %d", pageID, meta.PageCount))
+			continue
+		}
+		checkBTreePage(pageID, page, reachable, report)
+	}
+
+	state, err := freelist.Load(p, meta.FreeListPage)
+	if err != nil {
+		report.add("freelist_invalid", err.Error())
+		return nil
+	}
+	checkPageIDBounds("freelist_head", state.HeadPage, meta.PageCount, report)
+	seenFree := make(map[uint64]string)
+	for _, pageID := range state.PageIDs {
+		checkPageIDBounds("freelist_page", pageID, meta.PageCount, report)
+		if _, ok := reachable[pageID]; ok {
+			report.add("freelist_reachable_overlap", fmt.Sprintf("freelist page %d is reachable from tree root", pageID))
+		}
+		checkDuplicatePage("duplicate_freelist_page", pageID, "freelist page", seenFree, report)
+	}
+	for _, pageID := range state.FreePages {
+		checkPageIDBounds("free_page", pageID, meta.PageCount, report)
+		if _, ok := reachable[pageID]; ok {
+			report.add("free_page_reachable_overlap", fmt.Sprintf("free page %d is reachable from tree root", pageID))
+		}
+		checkDuplicatePage("duplicate_free_page", pageID, "free page", seenFree, report)
+	}
+	return nil
+}
+
+func checkBTreePage(pageID uint64, page []byte, reachable map[uint64]struct{}, report *CheckReport) {
+	node, err := btree.WrapNode(page)
+	if err != nil {
+		report.add("btree_page_invalid", fmt.Sprintf("page %d: %v", pageID, err))
+		return
+	}
+	var previous []byte
+	for i := 0; i < node.Count(); i++ {
+		var key []byte
+		switch node.Type() {
+		case btree.NodeTypeLeaf:
+			cell, err := node.LeafCell(i)
+			if err != nil {
+				report.add("btree_page_invalid", fmt.Sprintf("leaf page %d cell %d: %v", pageID, i, err))
+				continue
+			}
+			key = cell.Key
+		case btree.NodeTypeInternal:
+			cell, err := node.InternalCell(i)
+			if err != nil {
+				report.add("btree_page_invalid", fmt.Sprintf("internal page %d cell %d: %v", pageID, i, err))
+				continue
+			}
+			key = cell.Key
+			if _, ok := reachable[cell.Child]; !ok {
+				report.add("btree_dangling_child", fmt.Sprintf("internal page %d references child %d", pageID, cell.Child))
+			}
+		default:
+			report.add("btree_page_invalid", fmt.Sprintf("page %d has unknown node type %d", pageID, node.Type()))
+			return
+		}
+		if previous != nil && bytes.Compare(previous, key) >= 0 {
+			report.add("btree_key_order", fmt.Sprintf("page %d cell %d key is not strictly increasing", pageID, i))
+		}
+		previous = append(previous[:0], key...)
+	}
+}
+
+func checkPageIDBounds(code string, pageID, pageCount uint64, report *CheckReport) {
+	if pageID == 0 {
+		return
+	}
+	if pageID < pager.MetaPageCount || pageID >= pageCount {
+		report.add(code+"_out_of_range", fmt.Sprintf("page %d outside page count %d", pageID, pageCount))
+	}
+}
+
+func checkDuplicatePage(code string, pageID uint64, label string, seen map[uint64]string, report *CheckReport) {
+	if pageID == 0 {
+		return
+	}
+	if previous, ok := seen[pageID]; ok {
+		report.add(code, fmt.Sprintf("%s %d duplicates %s", label, pageID, previous))
+		return
+	}
+	seen[pageID] = label
+}
+
 func (db *DB) checkIndexEntry(defs []TableDef, ref indexRef, key []byte, expectedIndexKeys map[string]string, seenIndexKeys map[string]struct{}, report *CheckReport) {
 	def := defs[ref.table]
 	index := def.Indexes[ref.index]
@@ -274,6 +385,43 @@ func collectPrefixes(defs []TableDef) prefixSet {
 		}
 	}
 	return out
+}
+
+func checkPrefixUniqueness(defs []TableDef) []CheckIssue {
+	var issues []CheckIssue
+	rowPrefixes := make(map[uint32]string)
+	indexPrefixes := make(map[uint32]string)
+	for _, def := range defs {
+		if previous, ok := rowPrefixes[def.Prefix]; ok {
+			issues = append(issues, CheckIssue{
+				Code:   "duplicate_table_prefix",
+				Detail: fmt.Sprintf("table %s shares prefix %d with table %s", def.Name, def.Prefix, previous),
+			})
+		}
+		rowPrefixes[def.Prefix] = def.Name
+		if previous, ok := indexPrefixes[def.Prefix]; ok {
+			issues = append(issues, CheckIssue{
+				Code:   "duplicate_table_index_prefix",
+				Detail: fmt.Sprintf("table %s prefix %d overlaps index %s", def.Name, def.Prefix, previous),
+			})
+		}
+		for _, index := range def.Indexes {
+			if previous, ok := indexPrefixes[index.Prefix]; ok {
+				issues = append(issues, CheckIssue{
+					Code:   "duplicate_index_prefix",
+					Detail: fmt.Sprintf("index %s shares prefix %d with %s", index.Name, index.Prefix, previous),
+				})
+			}
+			indexPrefixes[index.Prefix] = index.Name
+			if previous, ok := rowPrefixes[index.Prefix]; ok {
+				issues = append(issues, CheckIssue{
+					Code:   "duplicate_table_index_prefix",
+					Detail: fmt.Sprintf("index %s prefix %d overlaps table %s", index.Name, index.Prefix, previous),
+				})
+			}
+		}
+	}
+	return issues
 }
 
 func (r *CheckReport) add(code, detail string) {

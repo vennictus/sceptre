@@ -1,6 +1,7 @@
 package table
 
 import (
+	"encoding/binary"
 	"path/filepath"
 	"testing"
 )
@@ -110,6 +111,114 @@ func TestCheckReportsOrphanIndexEntry(t *testing.T) {
 	}
 	if !hasIssue(report, "orphan_index_entry") {
 		t.Fatalf("Check() issues = %+v, want orphan_index_entry", report.Issues)
+	}
+}
+
+func TestCheckReportsUnknownRowPrefix(t *testing.T) {
+	t.Parallel()
+
+	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "sceptre.db"))
+	defer db.Close()
+	mustCreateUsers(t, db)
+
+	key := []byte{rowKeyPrefix, 0, 0, 0, 99}
+	key = append(key, []byte("bad")...)
+	if err := db.kv.Set(key, []byte("value")); err != nil {
+		t.Fatalf("kv.Set(unknown row prefix) error = %v", err)
+	}
+
+	report, err := db.Check()
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !hasIssue(report, "unknown_row_prefix") {
+		t.Fatalf("Check() issues = %+v, want unknown_row_prefix", report.Issues)
+	}
+}
+
+func TestCheckReportsDuplicateTablePrefix(t *testing.T) {
+	t.Parallel()
+
+	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "sceptre.db"))
+	defer db.Close()
+	mustCreateUsers(t, db)
+	if err := db.CreateTable(TableDef{
+		Name: "accounts",
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "name", Type: TypeBytes},
+		},
+		PrimaryKey: []string{"id"},
+	}); err != nil {
+		t.Fatalf("CreateTable(accounts) error = %v", err)
+	}
+
+	accounts, ok, err := db.Table("accounts")
+	if err != nil {
+		t.Fatalf("Table(accounts) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("Table(accounts) ok = false, want true")
+	}
+	accounts.Prefix = 1
+	encoded, err := encodeTableDef(accounts)
+	if err != nil {
+		t.Fatalf("encodeTableDef() error = %v", err)
+	}
+	if err := db.kv.Set(catalogTableKey("accounts"), encoded); err != nil {
+		t.Fatalf("kv.Set(accounts schema) error = %v", err)
+	}
+
+	report, err := db.Check()
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !hasIssue(report, "duplicate_table_prefix") {
+		t.Fatalf("Check() issues = %+v, want duplicate_table_prefix", report.Issues)
+	}
+}
+
+func TestCheckReportsFreelistPageBounds(t *testing.T) {
+	t.Parallel()
+
+	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "sceptre.db"))
+	defer db.Close()
+	mustCreateUsers(t, db)
+
+	meta := db.kv.Pager().Meta()
+	meta.FreeListPage = meta.PageCount + 100
+	if err := db.kv.Pager().PublishMeta(meta); err != nil {
+		t.Fatalf("PublishMeta() error = %v", err)
+	}
+
+	report, err := db.Check()
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !hasIssue(report, "freelist_head_out_of_range") && !hasIssue(report, "freelist_invalid") {
+		t.Fatalf("Check() issues = %+v, want freelist bounds issue", report.Issues)
+	}
+}
+
+func TestCheckReportsInvalidCatalogMeta(t *testing.T) {
+	t.Parallel()
+
+	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "sceptre.db"))
+	defer db.Close()
+	mustCreateUsers(t, db)
+
+	var bad [4]byte
+	binary.BigEndian.PutUint32(bad[:], 0)
+	if err := db.kv.Set(catalogMetaKey, bad[:]); err != nil {
+		t.Fatalf("kv.Set(catalog meta) error = %v", err)
+	}
+
+	report, err := db.Check()
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !hasIssue(report, "catalog_meta_invalid") {
+		t.Fatalf("Check() issues = %+v, want catalog_meta_invalid", report.Issues)
 	}
 }
 
