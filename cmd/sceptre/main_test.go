@@ -26,6 +26,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre explain <db-path>") {
 		t.Fatalf("run() stdout = %q, want explain usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre check <db-path>") {
+		t.Fatalf("run() stdout = %q, want check usage", stdout.String())
+	}
 }
 
 func TestRunRejectsUnknownCommand(t *testing.T) {
@@ -122,6 +125,31 @@ func TestRunExplainPrintsPlan(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "residual=name = 'Ada'") {
 		t.Fatalf("run(explain) stdout = %q, want residual", stdout.String())
+	}
+}
+
+func TestRunCheckPrintsConsistencyReport(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	runOK(t, []string{"sql", path, "create table users (id int64, name bytes, age int64, primary key (id))"})
+	runOK(t, []string{"sql", path, "create index users_age on users (age)"})
+	runOK(t, []string{"sql", path, "insert into users (id, name, age) values (1, 'Ada', 31)"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"check", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(check) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status=ok") {
+		t.Fatalf("run(check) stdout = %q, want ok status", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "table=users rows=1 indexes=1") {
+		t.Fatalf("run(check) stdout = %q, want users table summary", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "issues=0") {
+		t.Fatalf("run(check) stdout = %q, want no issues", stdout.String())
 	}
 }
 

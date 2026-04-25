@@ -17,6 +17,7 @@ Usage:
   sceptre help
   sceptre sql <db-path> "<statement>"
   sceptre explain <db-path> "<statement>"
+  sceptre check <db-path>
   sceptre inspect meta <db-path>
   sceptre inspect tree <db-path>
   sceptre inspect freelist <db-path>
@@ -36,6 +37,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runSQL(args[1:], stdout, stderr)
 	case "explain":
 		return runExplain(args[1:], stdout, stderr)
+	case "check":
+		return runCheck(args[1:], stdout, stderr)
 	case "inspect":
 		return runInspect(args[1:], stdout, stderr)
 	default:
@@ -88,6 +91,32 @@ func runExplain(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	printExplainResult(stdout, plan)
+	return 0
+}
+
+func runCheck(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprint(stderr, "sceptre check: expected <db-path>\n\n")
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	db, err := table.Open(args[0], table.Options{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre check: open: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	report, err := db.Check()
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre check: %v\n", err)
+		return 1
+	}
+	printCheckResult(stdout, report)
+	if !report.OK() {
+		return 1
+	}
 	return 0
 }
 
@@ -186,6 +215,22 @@ func printExplainResult(stdout io.Writer, plan sql.Plan) {
 		fmt.Fprintf(stdout, "offset=%d\n", *plan.Offset)
 	}
 	fmt.Fprintf(stdout, "residual=%s\n", sql.FormatExpr(plan.Residual))
+}
+
+func printCheckResult(stdout io.Writer, report table.CheckReport) {
+	status := "ok"
+	if !report.OK() {
+		status = "failed"
+	}
+	fmt.Fprintf(stdout, "status=%s\n", status)
+	fmt.Fprintf(stdout, "tables=%d\n", len(report.Tables))
+	for _, table := range report.Tables {
+		fmt.Fprintf(stdout, "table=%s rows=%d indexes=%d\n", table.Name, table.Rows, table.Indexes)
+	}
+	fmt.Fprintf(stdout, "issues=%d\n", len(report.Issues))
+	for _, issue := range report.Issues {
+		fmt.Fprintf(stdout, "issue=%s detail=%s\n", issue.Code, issue.Detail)
+	}
 }
 
 func formatValue(value table.Value) string {
