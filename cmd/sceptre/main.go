@@ -507,8 +507,9 @@ func printCrashReport(stdout io.Writer, report debug.CrashReport) {
 	for _, crashCase := range report.Cases {
 		fmt.Fprintf(
 			stdout,
-			"case=%s recovered=%t check_ok=%t expected_new=%t observed_new=%t issues=%d path=%s\n",
+			"case=%s operation=%s recovered=%t check_ok=%t expected_new=%t observed_new=%t issues=%d path=%s\n",
 			crashCase.Stage,
+			crashCase.Operation,
 			crashCase.Recovered,
 			crashCase.CheckOK,
 			crashCase.ExpectedNew,

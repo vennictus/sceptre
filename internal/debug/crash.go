@@ -11,6 +11,7 @@ import (
 
 type CrashCase struct {
 	Stage       string
+	Operation   string
 	Path        string
 	Recovered   bool
 	CheckOK     bool
@@ -49,17 +50,19 @@ func CrashTest(path string) (CrashReport, error) {
 
 	report := CrashReport{WorkDir: workDir}
 	for _, stage := range kv.CommitStageNames() {
-		casePath := filepath.Join(workDir, sanitizeStage(stage)+".db")
-		crashCase, err := runCrashCase(casePath, stage)
-		if err != nil {
-			return report, err
+		for _, operation := range []string{"insert", "update", "delete"} {
+			casePath := filepath.Join(workDir, sanitizeStage(stage)+"_"+operation+".db")
+			crashCase, err := runCrashCase(casePath, stage, operation)
+			if err != nil {
+				return report, err
+			}
+			report.Cases = append(report.Cases, crashCase)
 		}
-		report.Cases = append(report.Cases, crashCase)
 	}
 	return report, nil
 }
 
-func runCrashCase(path, stage string) (CrashCase, error) {
+func runCrashCase(path, stage, operation string) (CrashCase, error) {
 	if err := seedCrashDatabase(path); err != nil {
 		return CrashCase{}, err
 	}
@@ -68,14 +71,10 @@ func runCrashCase(path, stage string) (CrashCase, error) {
 	if err != nil {
 		return CrashCase{}, err
 	}
-	insertErr := db.Insert("users", table.NewRecord(map[string]table.Value{
-		"id":   table.Int64Value(2),
-		"name": table.BytesValue([]byte("Grace")),
-		"age":  table.Int64Value(40),
-	}))
+	opErr := runCrashOperation(db, operation)
 	closeErr := db.Close()
-	if insertErr == nil {
-		return CrashCase{}, fmt.Errorf("crash case %s: insert unexpectedly succeeded", stage)
+	if opErr == nil {
+		return CrashCase{}, fmt.Errorf("crash case %s/%s: operation unexpectedly succeeded", stage, operation)
 	}
 	if closeErr != nil {
 		return CrashCase{}, closeErr
@@ -83,7 +82,7 @@ func runCrashCase(path, stage string) (CrashCase, error) {
 
 	reopened, err := table.Open(path, table.Options{})
 	if err != nil {
-		return CrashCase{Stage: stage, Path: path}, nil
+		return CrashCase{Stage: stage, Operation: operation, Path: path}, nil
 	}
 	defer reopened.Close()
 
@@ -91,11 +90,7 @@ func runCrashCase(path, stage string) (CrashCase, error) {
 	if err != nil {
 		return CrashCase{}, err
 	}
-	_, oldOK, err := reopened.Get("users", table.NewRecord(map[string]table.Value{"id": table.Int64Value(1)}))
-	if err != nil {
-		return CrashCase{}, err
-	}
-	_, newOK, err := reopened.Get("users", table.NewRecord(map[string]table.Value{"id": table.Int64Value(2)}))
+	observedNew, recovered, err := observeCrashState(reopened, operation)
 	if err != nil {
 		return CrashCase{}, err
 	}
@@ -103,13 +98,62 @@ func runCrashCase(path, stage string) (CrashCase, error) {
 	expectedNew := stage == "meta-published"
 	return CrashCase{
 		Stage:       stage,
+		Operation:   operation,
 		Path:        path,
-		Recovered:   oldOK,
+		Recovered:   recovered,
 		CheckOK:     check.OK(),
 		Issues:      len(check.Issues),
 		ExpectedNew: expectedNew,
-		ObservedNew: newOK,
+		ObservedNew: observedNew,
 	}, nil
+}
+
+func runCrashOperation(db *table.DB, operation string) error {
+	switch operation {
+	case "insert":
+		return db.Insert("users", table.NewRecord(map[string]table.Value{
+			"id":   table.Int64Value(2),
+			"name": table.BytesValue([]byte("Grace")),
+			"age":  table.Int64Value(40),
+		}))
+	case "update":
+		return db.Update("users", table.NewRecord(map[string]table.Value{
+			"id":   table.Int64Value(1),
+			"name": table.BytesValue([]byte("Ada")),
+			"age":  table.Int64Value(40),
+		}))
+	case "delete":
+		_, err := db.Delete("users", table.NewRecord(map[string]table.Value{"id": table.Int64Value(1)}))
+		return err
+	default:
+		return fmt.Errorf("unknown crash operation %q", operation)
+	}
+}
+
+func observeCrashState(db *table.DB, operation string) (bool, bool, error) {
+	switch operation {
+	case "insert":
+		_, oldOK, err := db.Get("users", table.NewRecord(map[string]table.Value{"id": table.Int64Value(1)}))
+		if err != nil {
+			return false, false, err
+		}
+		_, newOK, err := db.Get("users", table.NewRecord(map[string]table.Value{"id": table.Int64Value(2)}))
+		return newOK, oldOK, err
+	case "update":
+		row, ok, err := db.Get("users", table.NewRecord(map[string]table.Value{"id": table.Int64Value(1)}))
+		if err != nil || !ok {
+			return false, ok, err
+		}
+		return row.Values["age"].I64 == 40, true, nil
+	case "delete":
+		_, ok, err := db.Get("users", table.NewRecord(map[string]table.Value{"id": table.Int64Value(1)}))
+		if err != nil {
+			return false, false, err
+		}
+		return !ok, true, nil
+	default:
+		return false, false, fmt.Errorf("unknown crash operation %q", operation)
+	}
 }
 
 func seedCrashDatabase(path string) error {

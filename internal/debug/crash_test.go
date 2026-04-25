@@ -15,8 +15,8 @@ func TestCrashTestRunsRecoveryCases(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("CrashTest().OK() = false, report = %+v", report)
 	}
-	if len(report.Cases) != 3 {
-		t.Fatalf("case count = %d, want 3", len(report.Cases))
+	if len(report.Cases) != 9 {
+		t.Fatalf("case count = %d, want 9", len(report.Cases))
 	}
 	for _, crashCase := range report.Cases {
 		if crashCase.Path == "" {
@@ -27,6 +27,9 @@ func TestCrashTestRunsRecoveryCases(t *testing.T) {
 		}
 		if crashCase.Stage != "meta-published" && crashCase.ObservedNew {
 			t.Fatalf("%s observed_new = true, want false", crashCase.Stage)
+		}
+		if crashCase.Operation == "" {
+			t.Fatalf("case %+v has empty operation", crashCase)
 		}
 	}
 }

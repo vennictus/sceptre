@@ -287,14 +287,17 @@ func TestRunCrashTestPrintsRecoveryReport(t *testing.T) {
 	if !strings.Contains(stdout.String(), "status=ok") {
 		t.Fatalf("run(crash-test) stdout = %q, want ok status", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "cases=3") {
-		t.Fatalf("run(crash-test) stdout = %q, want three cases", stdout.String())
+	if !strings.Contains(stdout.String(), "cases=9") {
+		t.Fatalf("run(crash-test) stdout = %q, want nine cases", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "case=pages-written") {
 		t.Fatalf("run(crash-test) stdout = %q, want pages-written case", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "case=meta-published") {
 		t.Fatalf("run(crash-test) stdout = %q, want meta-published case", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "operation=update") || !strings.Contains(stdout.String(), "operation=delete") {
+		t.Fatalf("run(crash-test) stdout = %q, want update and delete operations", stdout.String())
 	}
 }
 
