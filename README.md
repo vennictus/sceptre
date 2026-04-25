@@ -135,6 +135,12 @@ go vet ./...
 go test ./...
 ```
 
+Run the storage benchmarks with:
+
+```powershell
+go test -bench=. ./internal/table
+```
+
 On some locked-down Windows machines, Application Control may block generated
 Go test executables. In that environment, compiled test binaries still provide
 a useful verification pass:
@@ -152,5 +158,4 @@ the project usable; it is about expanding proof and polish.
 Near-term improvements:
 
 - broader crash tests above the table and transaction layers
-- benchmark commands for insert, lookup, scan, and index lookup paths
 - deeper docs and diagrams for file format, commit protocol, and isolation
