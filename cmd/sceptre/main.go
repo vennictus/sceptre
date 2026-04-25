@@ -25,6 +25,7 @@ Usage:
   sceptre inspect meta <db-path>
   sceptre inspect tree <db-path>
   sceptre inspect freelist <db-path>
+  sceptre inspect schema <db-path>
   sceptre inspect table <db-path> <table>
   sceptre inspect index <db-path> <index>
   sceptre inspect pages <db-path>
@@ -155,6 +156,9 @@ func runExplain(args []string, stdout, stderr io.Writer) int {
 
 func runShellCommand(db *table.DB, line string, stdout io.Writer) error {
 	switch line {
+	case ".help":
+		printShellHelp(stdout)
+		return nil
 	case ".tables":
 		tables, err := db.Tables()
 		if err != nil {
@@ -293,6 +297,27 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "head_page=%d\n", info.HeadPage)
 		fmt.Fprintf(stdout, "freelist_pages=%v\n", info.PageIDs)
 		fmt.Fprintf(stdout, "free_pages=%v\n", info.FreePages)
+		return 0
+	case "schema":
+		if len(args) != 2 {
+			fmt.Fprint(stderr, "sceptre inspect schema: expected <db-path>\n\n")
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		db, err := table.Open(args[1], table.Options{})
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre inspect schema: %v\n", err)
+			return 1
+		}
+		defer db.Close()
+		tables, err := db.Tables()
+		if err != nil {
+			fmt.Fprintf(stderr, "sceptre inspect schema: %v\n", err)
+			return 1
+		}
+		for _, def := range tables {
+			printSchema(stdout, def)
+		}
 		return 0
 	case "table":
 		if len(args) != 3 {
@@ -434,6 +459,14 @@ func printCheckResult(stdout io.Writer, report table.CheckReport) {
 	for _, issue := range report.Issues {
 		fmt.Fprintf(stdout, "issue=%s detail=%s\n", issue.Code, issue.Detail)
 	}
+}
+
+func printShellHelp(stdout io.Writer) {
+	fmt.Fprintln(stdout, ".help")
+	fmt.Fprintln(stdout, ".tables")
+	fmt.Fprintln(stdout, ".schema")
+	fmt.Fprintln(stdout, ".indexes")
+	fmt.Fprintln(stdout, ".quit")
 }
 
 func printSchema(stdout io.Writer, def table.TableDef) {

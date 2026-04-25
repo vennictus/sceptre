@@ -35,6 +35,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre crash-test <db-path>") {
 		t.Fatalf("run() stdout = %q, want crash-test usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre inspect schema <db-path>") {
+		t.Fatalf("run() stdout = %q, want inspect schema usage", stdout.String())
+	}
 }
 
 func TestRunRejectsUnknownCommand(t *testing.T) {
@@ -87,6 +90,7 @@ func TestRunShellExecutesStatementsAndDotCommands(t *testing.T) {
 		"create table users (id int64, name bytes, primary key (id));",
 		"create index users_name on users (name);",
 		"insert into users (id, name) values (1, 'Ada');",
+		".help",
 		".tables",
 		".indexes",
 		".schema",
@@ -105,6 +109,9 @@ func TestRunShellExecutesStatementsAndDotCommands(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "users\n") {
 		t.Fatalf("runShell() stdout = %q, want table name", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), ".help") || !strings.Contains(stdout.String(), ".quit") {
+		t.Fatalf("runShell() stdout = %q, want help output", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "users_name\tusers\tname") {
 		t.Fatalf("runShell() stdout = %q, want index listing", stdout.String())
@@ -190,6 +197,27 @@ func TestRunInspectTableIndexAndPages(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "kind=meta_active") {
 		t.Fatalf("run(inspect pages) stdout = %q, want active meta page", stdout.String())
+	}
+}
+
+func TestRunInspectSchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	runOK(t, []string{"sql", path, "create table users (id int64, name bytes, primary key (id))"})
+	runOK(t, []string{"sql", path, "create index users_name on users (name)"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"inspect", "schema", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(inspect schema) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "create table users") {
+		t.Fatalf("run(inspect schema) stdout = %q, want table schema", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "create index users_name on users") {
+		t.Fatalf("run(inspect schema) stdout = %q, want index schema", stdout.String())
 	}
 }
 
