@@ -63,6 +63,9 @@ go run ./cmd/sceptre explain app.db "select * from users where age = 31"
 go run ./cmd/sceptre inspect meta app.db
 go run ./cmd/sceptre inspect tree app.db
 go run ./cmd/sceptre inspect freelist app.db
+go run ./cmd/sceptre inspect table app.db users
+go run ./cmd/sceptre inspect index app.db users_age
+go run ./cmd/sceptre inspect pages app.db
 go run ./cmd/sceptre check app.db
 go run ./cmd/sceptre crash-test scratch.db
 ```
@@ -80,6 +83,9 @@ sceptre crash-test <db-path>
 sceptre inspect meta <db-path>
 sceptre inspect tree <db-path>
 sceptre inspect freelist <db-path>
+sceptre inspect table <db-path> <table>
+sceptre inspect index <db-path> <index>
+sceptre inspect pages <db-path>
 ```
 
 `crash-test` creates a scratch directory beside the provided path and runs
@@ -113,17 +119,20 @@ Important debugging surfaces:
 - `inspect meta` shows the active meta page state.
 - `inspect tree` dumps the ordered KV entries reachable from the root.
 - `inspect freelist` shows reusable pages.
+- `inspect table` shows schema, indexes, and rows for one table.
+- `inspect index` shows derived index entries and primary-key targets.
+- `inspect pages` shows the page inventory and B+ tree page summaries.
 - `explain` reports the chosen query access path and residual filters.
 - `check` validates table rows and secondary-index entries.
 - `crash-test` interrupts commits at known stages and verifies recovery.
 
 ## Testing
 
-Use the normal Go test command on machines that allow generated test binaries:
+CI runs on Linux with:
 
 ```powershell
-go test ./...
 go vet ./...
+go test ./...
 ```
 
 On some locked-down Windows machines, Application Control may block generated
@@ -137,13 +146,11 @@ go vet ./...
 
 ## Project Status
 
-The core V1 stack is implemented. The remaining polish work is mostly around
-interactive ergonomics, broader validation, documentation depth, and benchmarks.
+The core V1 stack is implemented. The remaining work is no longer about making
+the project usable; it is about expanding proof and polish.
 
 Near-term improvements:
 
-- interactive SQL shell
-- richer table/index inspection commands
 - broader crash tests above the table and transaction layers
 - benchmark commands for insert, lookup, scan, and index lookup paths
-- deeper docs for file format, commit protocol, and isolation
+- deeper docs and diagrams for file format, commit protocol, and isolation
