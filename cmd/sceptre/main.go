@@ -98,8 +98,11 @@ func runShell(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer db.Close()
 
 	scanner := bufio.NewScanner(stdin)
+	showPrompt := isTerminalInput(stdin)
 	for {
-		fmt.Fprint(stdout, "sceptre> ")
+		if showPrompt {
+			fmt.Fprint(stdout, "sceptre> ")
+		}
 		if !scanner.Scan() {
 			break
 		}
@@ -182,11 +185,13 @@ func runShellCommand(db *table.DB, line string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
+		rows := [][]string{}
 		for _, def := range tables {
 			for _, index := range def.Indexes {
-				fmt.Fprintf(stdout, "%s\t%s\t%s\n", index.Name, def.Name, strings.Join(index.Columns, ","))
+				rows = append(rows, []string{index.Name, def.Name, strings.Join(index.Columns, ",")})
 			}
 		}
+		printStringTable(stdout, []string{"index", "table", "columns"}, rows)
 		return nil
 	default:
 		return fmt.Errorf("unknown shell command %q", line)
@@ -406,14 +411,15 @@ func printSQLResult(stdout io.Writer, result sql.Result) {
 		return
 	}
 
-	fmt.Fprintln(stdout, strings.Join(result.Columns, "\t"))
+	rows := make([][]string, 0, len(result.Rows))
 	for _, row := range result.Rows {
 		cells := make([]string, 0, len(row))
 		for _, value := range row {
 			cells = append(cells, formatValue(value))
 		}
-		fmt.Fprintln(stdout, strings.Join(cells, "\t"))
+		rows = append(rows, cells)
 	}
+	printStringTable(stdout, result.Columns, rows)
 }
 
 func printExplainResult(stdout io.Writer, plan sql.Plan) {
@@ -462,11 +468,14 @@ func printCheckResult(stdout io.Writer, report table.CheckReport) {
 }
 
 func printShellHelp(stdout io.Writer) {
-	fmt.Fprintln(stdout, ".help")
-	fmt.Fprintln(stdout, ".tables")
-	fmt.Fprintln(stdout, ".schema")
-	fmt.Fprintln(stdout, ".indexes")
-	fmt.Fprintln(stdout, ".quit")
+	rows := [][]string{
+		{".help", "show shell commands"},
+		{".tables", "list tables"},
+		{".schema", "show schema statements"},
+		{".indexes", "list secondary indexes"},
+		{".quit", "exit the shell"},
+	}
+	printStringTable(stdout, []string{"command", "description"}, rows)
 }
 
 func printSchema(stdout io.Writer, def table.TableDef) {
@@ -565,6 +574,58 @@ func formatBytes(value []byte) string {
 		return `""`
 	}
 	return fmt.Sprintf("%q", string(value))
+}
+
+func printStringTable(stdout io.Writer, columns []string, rows [][]string) {
+	widths := make([]int, len(columns))
+	for i, column := range columns {
+		widths[i] = len(column)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if i < len(widths) && len(cell) > widths[i] {
+				widths[i] = len(cell)
+			}
+		}
+	}
+
+	writeRow := func(values []string) {
+		for i := range columns {
+			if i > 0 {
+				fmt.Fprint(stdout, "  ")
+			}
+			value := ""
+			if i < len(values) {
+				value = values[i]
+			}
+			fmt.Fprintf(stdout, "%-*s", widths[i], value)
+		}
+		fmt.Fprintln(stdout)
+	}
+
+	writeRow(columns)
+	for i, width := range widths {
+		if i > 0 {
+			fmt.Fprint(stdout, "  ")
+		}
+		fmt.Fprint(stdout, strings.Repeat("-", width))
+	}
+	fmt.Fprintln(stdout)
+	for _, row := range rows {
+		writeRow(row)
+	}
+}
+
+func isTerminalInput(input io.Reader) bool {
+	file, ok := input.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func sqlFormatCondition(condition sql.Condition) string {

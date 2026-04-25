@@ -74,10 +74,10 @@ func TestRunSQLExecutesStatements(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(sql select) exit code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "id\tname") {
+	if !strings.Contains(stdout.String(), "id  name") {
 		t.Fatalf("run(sql select) stdout = %q, want header", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "1\tAda") {
+	if !strings.Contains(stdout.String(), "1   Ada") {
 		t.Fatalf("run(sql select) stdout = %q, want row", stdout.String())
 	}
 }
@@ -113,14 +113,17 @@ func TestRunShellExecutesStatementsAndDotCommands(t *testing.T) {
 	if !strings.Contains(stdout.String(), ".help") || !strings.Contains(stdout.String(), ".quit") {
 		t.Fatalf("runShell() stdout = %q, want help output", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "users_name\tusers\tname") {
+	if !strings.Contains(stdout.String(), "users_name  users  name") {
 		t.Fatalf("runShell() stdout = %q, want index listing", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "create table users") {
 		t.Fatalf("runShell() stdout = %q, want schema", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "1\tAda") {
+	if !strings.Contains(stdout.String(), "1   Ada") {
 		t.Fatalf("runShell() stdout = %q, want selected row", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "sceptre>") {
+		t.Fatalf("runShell() stdout = %q, want no prompt for piped input", stdout.String())
 	}
 }
 
