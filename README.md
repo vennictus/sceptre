@@ -16,9 +16,8 @@ The project implements the stack from disk pages up to a small SQL layer:
 - SQL parsing and execution for core statements
 - CLI tools for inspection, query explanation, consistency checks, and crash testing
 
-The goal is not to replace SQLite or Postgres. The goal is to be a compact
-database engine that is useful to run, easy to inspect, and clear enough to
-study end to end.
+The goal is a compact database engine that is useful to run, easy to inspect,
+and clear enough to study end to end.
 
 ## Current Capabilities
 
@@ -41,8 +40,8 @@ Sceptre currently supports:
 - `check` for table/index consistency validation
 - `crash-test` for commit-boundary recovery verification
 
-The SQL layer is deliberately small. V1 does not aim to support joins,
-aggregates, subqueries, replication, networking, or full SQL compatibility.
+Sceptre is focused on the embedded single-file database path: storage,
+indexing, transactions, SQL execution, inspection, and recovery verification.
 
 ## Quick Demo
 
@@ -69,6 +68,8 @@ go run ./cmd/sceptre inspect pages app.db
 go run ./cmd/sceptre check app.db
 go run ./cmd/sceptre crash-test scratch.db
 ```
+
+For a full walkthrough, see [docs/demo.md](docs/demo.md).
 
 ## CLI
 
@@ -107,6 +108,21 @@ internal/btree     ordered page-based tree
 internal/pager     file pages, meta pages, checksums, fsync
 internal/debug     inspection and crash/recovery tooling
 ```
+
+See [docs/architecture.md](docs/architecture.md) for the layer-by-layer design.
+
+## Focused Scope
+
+Sceptre is intentionally centered on the embedded database engine itself:
+
+- local single-file storage
+- one process owns the database file
+- transparent page, tree, table, index, and freelist inspection
+- deterministic recovery checks
+- a small SQL layer over the storage engine
+
+That focus keeps the project about database internals instead of turning it
+into a network server or broad SQL compatibility project.
 
 ## What Makes It Different
 
@@ -152,10 +168,6 @@ go vet ./...
 
 ## Project Status
 
-The core V1 stack is implemented. The remaining work is no longer about making
-the project usable; it is about expanding proof and polish.
-
-Near-term improvements:
-
-- broader crash tests above the table and transaction layers
-- deeper docs and diagrams for file format, commit protocol, and isolation
+The core stack is implemented and demoable end to end. The repository is
+organized around the same identity throughout the code, tests, CI, docs,
+benchmarks, and CLI tooling: a transparent embedded database.
