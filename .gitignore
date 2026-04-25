@@ -11,6 +11,10 @@ coverage.out
 *.coverprofile
 .coverprofile
 
+# Local demo databases
+*.db
+*.crash-*/
+
 # Local Go cache / temp dirs
 .gocache/
 .gotmp/

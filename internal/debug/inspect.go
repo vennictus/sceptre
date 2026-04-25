@@ -222,6 +222,10 @@ func InspectPages(path string) (PagesInfo, error) {
 	for _, pageID := range free.PageIDs {
 		freelistPages[pageID] = struct{}{}
 	}
+	freePages := make(map[uint64]struct{}, len(free.FreePages))
+	for _, pageID := range free.FreePages {
+		freePages[pageID] = struct{}{}
+	}
 
 	meta := p.Meta()
 	info := PagesInfo{
@@ -241,6 +245,8 @@ func InspectPages(path string) (PagesInfo, error) {
 			info.Pages = append(info.Pages, PageInfo{ID: pageID, Kind: "freelist_head"})
 		case hasPage(freelistPages, pageID):
 			info.Pages = append(info.Pages, PageInfo{ID: pageID, Kind: "freelist"})
+		case hasPage(freePages, pageID):
+			info.Pages = append(info.Pages, PageInfo{ID: pageID, Kind: "free_page"})
 		default:
 			page, err := p.ReadPage(pageID)
 			if err != nil {

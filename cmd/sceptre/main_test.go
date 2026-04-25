@@ -198,6 +198,17 @@ func TestRunInspectTableIndexAndPages(t *testing.T) {
 	if !strings.Contains(stdout.String(), "kind=meta_active") {
 		t.Fatalf("run(inspect pages) stdout = %q, want active meta page", stdout.String())
 	}
+
+	runOK(t, []string{"sql", path, "update users set age = 32 where id = 1"})
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"inspect", "pages", path}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(inspect pages after update) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "kind=free_page") {
+		t.Fatalf("run(inspect pages after update) stdout = %q, want reusable free page", stdout.String())
+	}
 }
 
 func TestRunInspectSchema(t *testing.T) {
