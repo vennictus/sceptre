@@ -301,6 +301,54 @@ func (db *DB) Insert(tableName string, record Record) error {
 	return db.writeRow(tableName, record, writeInsertOnly)
 }
 
+// InsertMany writes rows in one durable commit and fails if any row already exists.
+func (db *DB) InsertMany(tableName string, records []Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(records))
+	mutations := make([]kv.Mutation, 0, len(records)*(1+len(def.Indexes)))
+	for _, record := range records {
+		if err := validateFullRecord(def, record); err != nil {
+			return err
+		}
+
+		keyRecord := primaryKeyRecord(def, record)
+		rowKey, err := encodeRowKey(def, keyRecord)
+		if err != nil {
+			return err
+		}
+		keyString := string(rowKey)
+		if _, exists := seen[keyString]; exists {
+			return ErrRowExists
+		}
+		seen[keyString] = struct{}{}
+
+		if _, exists, err := db.kv.Get(rowKey); err != nil {
+			return err
+		} else if exists {
+			return ErrRowExists
+		}
+
+		rowValue, err := encodeRowValue(def, record)
+		if err != nil {
+			return err
+		}
+		mutations = append(mutations, kv.Put(rowKey, rowValue))
+		puts, err := putIndexMutations(def, record)
+		if err != nil {
+			return err
+		}
+		mutations = append(mutations, puts...)
+	}
+	return db.kv.Apply(mutations)
+}
+
 // Update overwrites an existing row and fails if the primary key is missing.
 func (db *DB) Update(tableName string, record Record) error {
 	return db.writeRow(tableName, record, writeUpdateOnly)
@@ -364,6 +412,57 @@ func (db *DB) Delete(tableName string, key Record) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// DeleteMany removes rows by primary key in one durable commit.
+func (db *DB) DeleteMany(tableName string, keys []Record) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return 0, err
+	}
+
+	seen := make(map[string]struct{}, len(keys))
+	removed := 0
+	mutations := make([]kv.Mutation, 0, len(keys)*(1+len(def.Indexes)))
+	for _, key := range keys {
+		if err := validateKeyRecord(def, key); err != nil {
+			return 0, err
+		}
+		rowKey, err := encodeRowKey(def, key)
+		if err != nil {
+			return 0, err
+		}
+		keyString := string(rowKey)
+		if _, exists := seen[keyString]; exists {
+			continue
+		}
+		seen[keyString] = struct{}{}
+
+		old, ok, err := db.Get(tableName, key)
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			continue
+		}
+		removed++
+		mutations = append(mutations, kv.Delete(rowKey))
+		deletes, err := deleteIndexMutations(def, old)
+		if err != nil {
+			return 0, err
+		}
+		mutations = append(mutations, deletes...)
+	}
+	if len(mutations) == 0 {
+		return 0, nil
+	}
+	if err := db.kv.Apply(mutations); err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 
 type writeMode int

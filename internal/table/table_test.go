@@ -149,6 +149,82 @@ func TestPrimaryKeyCRUD(t *testing.T) {
 	}
 }
 
+func TestInsertManyCommitsRowsAndIndexesTogether(t *testing.T) {
+	t.Parallel()
+
+	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "sceptre.db"))
+	defer db.Close()
+	if err := db.CreateTable(usersTableDef()); err != nil {
+		t.Fatalf("CreateTable() error = %v", err)
+	}
+	if err := db.CreateIndex("users", IndexDef{Name: "users_age", Columns: []string{"age"}}); err != nil {
+		t.Fatalf("CreateIndex() error = %v", err)
+	}
+
+	rows := []Record{
+		NewRecord(map[string]Value{"id": Int64Value(1), "name": BytesValue([]byte("Ada")), "age": Int64Value(31)}),
+		NewRecord(map[string]Value{"id": Int64Value(2), "name": BytesValue([]byte("Grace")), "age": Int64Value(31)}),
+		NewRecord(map[string]Value{"id": Int64Value(3), "name": BytesValue([]byte("Linus")), "age": Int64Value(55)}),
+	}
+	if err := db.InsertMany("users", rows); err != nil {
+		t.Fatalf("InsertMany() error = %v", err)
+	}
+
+	got, err := db.LookupIndex("users", "users_age", NewRecord(map[string]Value{"age": Int64Value(31)}))
+	if err != nil {
+		t.Fatalf("LookupIndex() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LookupIndex() rows = %d, want 2", len(got))
+	}
+	if err := db.InsertMany("users", []Record{rows[0]}); !errors.Is(err, ErrRowExists) {
+		t.Fatalf("InsertMany(duplicate existing) error = %v, want %v", err, ErrRowExists)
+	}
+	if err := db.InsertMany("users", []Record{rows[0], rows[0]}); !errors.Is(err, ErrRowExists) {
+		t.Fatalf("InsertMany(duplicate batch) error = %v, want %v", err, ErrRowExists)
+	}
+}
+
+func TestDeleteManyRemovesRowsAndIndexesTogether(t *testing.T) {
+	t.Parallel()
+
+	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "sceptre.db"))
+	defer db.Close()
+	if err := db.CreateTable(usersTableDef()); err != nil {
+		t.Fatalf("CreateTable() error = %v", err)
+	}
+	if err := db.CreateIndex("users", IndexDef{Name: "users_age", Columns: []string{"age"}}); err != nil {
+		t.Fatalf("CreateIndex() error = %v", err)
+	}
+	rows := []Record{
+		NewRecord(map[string]Value{"id": Int64Value(1), "name": BytesValue([]byte("Ada")), "age": Int64Value(31)}),
+		NewRecord(map[string]Value{"id": Int64Value(2), "name": BytesValue([]byte("Grace")), "age": Int64Value(31)}),
+		NewRecord(map[string]Value{"id": Int64Value(3), "name": BytesValue([]byte("Linus")), "age": Int64Value(55)}),
+	}
+	if err := db.InsertMany("users", rows); err != nil {
+		t.Fatalf("InsertMany() error = %v", err)
+	}
+
+	removed, err := db.DeleteMany("users", []Record{
+		NewRecord(map[string]Value{"id": Int64Value(1)}),
+		NewRecord(map[string]Value{"id": Int64Value(2)}),
+	})
+	if err != nil {
+		t.Fatalf("DeleteMany() error = %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("DeleteMany() removed = %d, want 2", removed)
+	}
+
+	got, err := db.LookupIndex("users", "users_age", NewRecord(map[string]Value{"age": Int64Value(31)}))
+	if err != nil {
+		t.Fatalf("LookupIndex() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("LookupIndex() rows = %d, want 0", len(got))
+	}
+}
+
 func TestCompositePrimaryKeyRoundTrip(t *testing.T) {
 	t.Parallel()
 
