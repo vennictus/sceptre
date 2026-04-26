@@ -97,7 +97,7 @@ func AnalyzeSelect(db *table.DB, stmt *SelectStmt) (AnalyzeReport, error) {
 		RowsReturned: returned,
 		TotalTime:    time.Since(totalStart),
 		Stages: []AnalyzeStage{
-			{Name: string(plan.Access), RowsIn: 0, RowsOut: len(rows), Duration: candidateDuration},
+			{Name: string(plan.Access), RowsIn: -1, RowsOut: len(rows), Duration: candidateDuration},
 			{Name: "filter_project", RowsIn: len(rows), RowsOut: returned, Duration: filterDuration},
 		},
 	}

@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sceptre/internal/debug"
 	"sceptre/internal/sql"
 	"sceptre/internal/table"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const usage = `sceptre is an embedded relational database engine.
@@ -18,12 +20,14 @@ const usage = `sceptre is an embedded relational database engine.
 Usage:
   sceptre
   sceptre help
+  sceptre demo [db-path] [--rows <n>] [--force]
   sceptre sql <db-path> "<statement>"
   sceptre shell <db-path>
   sceptre explain <db-path> "<statement>"
   sceptre explain-analyze <db-path> "<select>"
+  sceptre trace <db-path> "<select>"
   sceptre check <db-path>
-  sceptre crash-test <db-path>
+  sceptre crash-test <db-path> [--random <n>] [--seed <n>]
   sceptre inspect meta <db-path>
   sceptre inspect tree <db-path>
   sceptre inspect freelist <db-path>
@@ -44,6 +48,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
+	case "demo":
+		return runDemo(args[1:], stdout, stderr)
 	case "sql":
 		return runSQL(args[1:], stdout, stderr)
 	case "shell":
@@ -52,6 +58,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runExplain(args[1:], stdout, stderr)
 	case "explain-analyze":
 		return runExplainAnalyze(args[1:], stdout, stderr)
+	case "trace":
+		return runTrace(args[1:], stdout, stderr)
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
 	case "crash-test":
@@ -63,6 +71,225 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
+}
+
+type demoOptions struct {
+	path  string
+	rows  int
+	force bool
+}
+
+func runDemo(args []string, stdout, stderr io.Writer) int {
+	opts, err := parseDemoArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: %v\n\n", err)
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	if _, err := os.Stat(opts.path); err == nil && !opts.force {
+		fmt.Fprintf(stderr, "sceptre demo: %s already exists; pass --force to replace it\n", opts.path)
+		return 2
+	} else if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "sceptre demo: stat database: %v\n", err)
+		return 1
+	}
+	if opts.force {
+		if err := os.Remove(opts.path); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "sceptre demo: remove old database: %v\n", err)
+			return 1
+		}
+	}
+
+	fmt.Fprintln(stdout, "Sceptre guided demo")
+	fmt.Fprintf(stdout, "database=%s\n", opts.path)
+	fmt.Fprintf(stdout, "rows=%d\n", opts.rows)
+	fmt.Fprintln(stdout)
+
+	db, err := table.Open(opts.path, table.Options{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: open: %v\n", err)
+		return 1
+	}
+
+	printDemoSection(stdout, "1. create schema")
+	if err := db.CreateTable(table.TableDef{
+		Name: "users",
+		Columns: []table.Column{
+			{Name: "id", Type: table.TypeInt64},
+			{Name: "name", Type: table.TypeBytes},
+			{Name: "age", Type: table.TypeInt64},
+			{Name: "city", Type: table.TypeBytes},
+		},
+		PrimaryKey: []string{"id"},
+	}); err != nil {
+		db.Close()
+		fmt.Fprintf(stderr, "sceptre demo: create table: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "created table users(id, name, age, city)")
+
+	printDemoSection(stdout, "2. load data")
+	insertStart := time.Now()
+	progressEvery := demoProgressEvery(opts.rows)
+	batchSize := demoBatchSize(opts.rows)
+	fmt.Fprintf(stdout, "loading generated rows; no input required\n")
+	fmt.Fprintf(stdout, "batch_size=%d\n", batchSize)
+	fmt.Fprintf(stdout, "loaded=0/%d\n", opts.rows)
+	for start := 1; start <= opts.rows; start += batchSize {
+		end := start + batchSize - 1
+		if end > opts.rows {
+			end = opts.rows
+		}
+		batch := make([]table.Record, 0, end-start+1)
+		for i := start; i <= end; i++ {
+			batch = append(batch, demoUserRecord(i))
+		}
+		if err := db.InsertMany("users", batch); err != nil {
+			db.Close()
+			fmt.Fprintf(stderr, "sceptre demo: insert rows %d-%d: %v\n", start, end, err)
+			return 1
+		}
+		if end%progressEvery == 0 || end == opts.rows {
+			fmt.Fprintf(stdout, "loaded=%d/%d\n", end, opts.rows)
+		}
+	}
+	insertDuration := time.Since(insertStart)
+	fmt.Fprintf(stdout, "inserted=%d time=%s\n", opts.rows, insertDuration)
+
+	query := "select id, name, age from users where age = 42"
+	printDemoSection(stdout, "3. query before index")
+	before, err := sql.Analyze(db, query)
+	if err != nil {
+		db.Close()
+		fmt.Fprintf(stderr, "sceptre demo: analyze before index: %v\n", err)
+		return 1
+	}
+	printDemoAnalyze(stdout, before)
+
+	printDemoSection(stdout, "4. create index")
+	indexStart := time.Now()
+	if err := db.CreateIndex("users", table.IndexDef{Name: "users_age", Columns: []string{"age"}}); err != nil {
+		db.Close()
+		fmt.Fprintf(stderr, "sceptre demo: create index: %v\n", err)
+		return 1
+	}
+	indexDuration := time.Since(indexStart)
+	fmt.Fprintf(stdout, "created index users_age(age) time=%s\n", indexDuration)
+
+	printDemoSection(stdout, "5. query after index")
+	after, err := sql.Analyze(db, query)
+	if err != nil {
+		db.Close()
+		fmt.Fprintf(stderr, "sceptre demo: analyze after index: %v\n", err)
+		return 1
+	}
+	printDemoAnalyze(stdout, after)
+
+	printDemoSection(stdout, "6. performance comparison")
+	printStringTable(stdout, []string{"query", "access", "rows_scanned", "time"}, [][]string{
+		{"without_index", string(before.Plan.Access), fmt.Sprintf("%d", before.RowsScanned), before.TotalTime.String()},
+		{"with_index", string(after.Plan.Access), fmt.Sprintf("%d", after.RowsScanned), after.TotalTime.String()},
+	})
+	fmt.Fprintf(stdout, "takeaway: index reduced scanned rows from %d to %d (%s fewer rows scanned)\n", before.RowsScanned, after.RowsScanned, formatReduction(before.RowsScanned, after.RowsScanned))
+	fmt.Fprintf(stdout, "takeaway: query time changed from %s to %s (%s faster)\n", before.TotalTime, after.TotalTime, formatDurationRatio(before.TotalTime, after.TotalTime))
+
+	printDemoSection(stdout, "7. delete data and show freelist")
+	deleteCount := opts.rows * 30 / 100
+	deleteStart := time.Now()
+	deleted := 0
+	for start := 1; start <= deleteCount; start += batchSize {
+		end := start + batchSize - 1
+		if end > deleteCount {
+			end = deleteCount
+		}
+		keys := make([]table.Record, 0, end-start+1)
+		for i := start; i <= end; i++ {
+			keys = append(keys, table.NewRecord(map[string]table.Value{"id": table.Int64Value(int64(i))}))
+		}
+		removed, err := db.DeleteMany("users", keys)
+		if err != nil {
+			db.Close()
+			fmt.Fprintf(stderr, "sceptre demo: delete rows %d-%d: %v\n", start, end, err)
+			return 1
+		}
+		deleted += removed
+	}
+	deleteDuration := time.Since(deleteStart)
+	fmt.Fprintf(stdout, "deleted=%d time=%s\n", deleted, deleteDuration)
+	fmt.Fprintln(stdout, "freelist: deleted rows retire old pages; committed free pages can be reused by future inserts.")
+	fmt.Fprintln(stdout, "freelist: this keeps the file reusable instead of treating every delete as lost space.")
+	if err := db.Close(); err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: close: %v\n", err)
+		return 1
+	}
+
+	free, err := debug.InspectFreeList(opts.path)
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: inspect freelist: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "head_page=%d\n", free.HeadPage)
+	fmt.Fprintf(stdout, "freelist_pages=%d\n", len(free.PageIDs))
+	fmt.Fprintf(stdout, "free_page_count=%d\n", len(free.FreePages))
+	if len(free.FreePages) > 0 {
+		fmt.Fprintf(stdout, "free_pages_sample=%v\n", sampleUint64s(free.FreePages, 12))
+	}
+
+	printDemoSection(stdout, "8. inspect storage")
+	pages, err := debug.InspectPages(opts.path)
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: inspect pages: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "page_size=%d\n", pages.PageSize)
+	fmt.Fprintf(stdout, "page_count=%d\n", pages.PageCount)
+	for _, page := range samplePages(pages.Pages, 8) {
+		fmt.Fprintf(stdout, "page=%d kind=%s cells=%d free_bytes=%d\n", page.ID, page.Kind, page.Cells, page.FreeBytes)
+	}
+	pageID := firstInspectablePage(pages.Pages)
+	detail, err := debug.InspectPage(opts.path, pageID)
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: inspect page: %v\n", err)
+		return 1
+	}
+	printDemoPageDetail(stdout, detail, 8)
+	if err := printDemoLogicalRows(stdout, opts.path, 5); err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: inspect logical rows: %v\n", err)
+		return 1
+	}
+
+	printDemoSection(stdout, "9. validate and recover")
+	checkDB, err := table.Open(opts.path, table.Options{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: reopen for check: %v\n", err)
+		return 1
+	}
+	check, err := checkDB.Check()
+	closeErr := checkDB.Close()
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: check: %v\n", err)
+		return 1
+	}
+	if closeErr != nil {
+		fmt.Fprintf(stderr, "sceptre demo: close after check: %v\n", closeErr)
+		return 1
+	}
+	printCheckResult(stdout, check)
+	crashPath := filepath.Join(filepath.Dir(opts.path), strings.TrimSuffix(filepath.Base(opts.path), filepath.Ext(opts.path))+".crash.db")
+	crash, err := debug.CrashTest(crashPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre demo: crash-test: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "crash_recovery=%s cases=%d\n", demoStatus(crash.OK()), len(crash.Cases))
+
+	printDemoSection(stdout, "summary")
+	fmt.Fprintf(stdout, "data: loaded %d rows, then deleted %d rows\n", opts.rows, deleted)
+	fmt.Fprintf(stdout, "index: %s scanned %d rows; %s scanned %d rows (%s reduction)\n", before.Plan.Access, before.RowsScanned, after.Plan.Access, after.RowsScanned, formatReduction(before.RowsScanned, after.RowsScanned))
+	fmt.Fprintf(stdout, "performance: query time improved from %s to %s (%s faster)\n", before.TotalTime, after.TotalTime, formatDurationRatio(before.TotalTime, after.TotalTime))
+	fmt.Fprintf(stdout, "storage: freelist has %d metadata page(s) tracking %d reusable page(s)\n", len(free.PageIDs), len(free.FreePages))
+	fmt.Fprintf(stdout, "reliability: consistency check %s; crash recovery %s across %d cases\n", demoStatus(check.OK()), demoStatus(crash.OK()), len(crash.Cases))
+	return 0
 }
 
 func runSQL(args []string, stdout, stderr io.Writer) int {
@@ -86,6 +313,210 @@ func runSQL(args []string, stdout, stderr io.Writer) int {
 	}
 	printSQLResult(stdout, result)
 	return 0
+}
+
+func parseDemoArgs(args []string) (demoOptions, error) {
+	opts := demoOptions{
+		path: "sceptre-demo.db",
+		rows: 100000,
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--force":
+			opts.force = true
+		case arg == "--rows":
+			if i+1 >= len(args) {
+				return demoOptions{}, fmt.Errorf("--rows expects a value")
+			}
+			rows, err := strconv.Atoi(args[i+1])
+			if err != nil || rows <= 0 {
+				return demoOptions{}, fmt.Errorf("--rows must be a positive integer")
+			}
+			opts.rows = rows
+			i++
+		case strings.HasPrefix(arg, "--rows="):
+			rows, err := strconv.Atoi(strings.TrimPrefix(arg, "--rows="))
+			if err != nil || rows <= 0 {
+				return demoOptions{}, fmt.Errorf("--rows must be a positive integer")
+			}
+			opts.rows = rows
+		case strings.HasPrefix(arg, "-"):
+			return demoOptions{}, fmt.Errorf("unknown option %q", arg)
+		default:
+			if opts.path != "sceptre-demo.db" {
+				return demoOptions{}, fmt.Errorf("expected at most one database path")
+			}
+			opts.path = arg
+		}
+	}
+	return opts, nil
+}
+
+func demoUserRecord(id int) table.Record {
+	cities := []string{"delhi", "mumbai", "blr", "pune", "nyc", "london", "tokyo", "berlin"}
+	return table.NewRecord(map[string]table.Value{
+		"id":   table.Int64Value(int64(id)),
+		"name": table.BytesValue([]byte(fmt.Sprintf("user_%06d", id))),
+		"age":  table.Int64Value(int64(18 + id%70)),
+		"city": table.BytesValue([]byte(cities[id%len(cities)])),
+	})
+}
+
+func demoProgressEvery(rows int) int {
+	switch {
+	case rows <= 100:
+		return rows
+	case rows <= 1000:
+		return 100
+	case rows <= 10000:
+		return 500
+	default:
+		return rows / 10
+	}
+}
+
+func demoBatchSize(rows int) int {
+	switch {
+	case rows <= 100:
+		return rows
+	case rows <= 1000:
+		return 100
+	default:
+		return 10000
+	}
+}
+
+func printDemoSection(stdout io.Writer, title string) {
+	fmt.Fprintln(stdout)
+	fmt.Fprintf(stdout, "== %s ==\n", title)
+}
+
+func printDemoPageDetail(stdout io.Writer, info debug.PageDetailInfo, cellLimit int) {
+	fmt.Fprintf(stdout, "page=%d\n", info.ID)
+	fmt.Fprintf(stdout, "kind=%s\n", info.Kind)
+	fmt.Fprintf(stdout, "page_size=%d\n", info.PageSize)
+	if info.Meta != nil {
+		fmt.Fprintf(stdout, "root_page=%d\n", info.Meta.RootPage)
+		fmt.Fprintf(stdout, "freelist_page=%d\n", info.Meta.FreeListPage)
+		fmt.Fprintf(stdout, "page_count=%d\n", info.Meta.PageCount)
+		fmt.Fprintf(stdout, "generation=%d\n", info.Meta.Generation)
+		return
+	}
+	if info.Kind == "freelist_head" || info.Kind == "freelist" {
+		fmt.Fprintf(stdout, "next_page=%d\n", info.NextPage)
+		fmt.Fprintf(stdout, "free_page_count=%d\n", len(info.FreePages))
+		fmt.Fprintf(stdout, "free_pages_sample=%v\n", sampleUint64s(info.FreePages, cellLimit))
+		return
+	}
+	if info.Kind != "btree_leaf" && info.Kind != "btree_internal" {
+		return
+	}
+	fmt.Fprintf(stdout, "cells=%d\n", info.Cells)
+	fmt.Fprintf(stdout, "lower=%d\n", info.Lower)
+	fmt.Fprintf(stdout, "upper=%d\n", info.Upper)
+	fmt.Fprintf(stdout, "free_bytes=%d\n", info.FreeBytes)
+	limit := cellLimit
+	if len(info.BTreeCells) < limit {
+		limit = len(info.BTreeCells)
+	}
+	for _, cell := range info.BTreeCells[:limit] {
+		if info.Kind == "btree_internal" {
+			fmt.Fprintf(stdout, "cell=%d child=%d key=%s\n", cell.Index, cell.Child, formatBytes(cell.Key))
+			continue
+		}
+		fmt.Fprintf(stdout, "cell=%d key=%s value=%s\n", cell.Index, formatBytes(cell.Key), formatBytes(cell.Value))
+	}
+	if len(info.BTreeCells) > limit {
+		fmt.Fprintf(stdout, "cells_omitted=%d\n", len(info.BTreeCells)-limit)
+	}
+	fmt.Fprintln(stdout, "note: raw cells are encoded storage records; decoded logical rows are shown below.")
+}
+
+func printDemoAnalyze(stdout io.Writer, report sql.AnalyzeReport) {
+	fmt.Fprintf(stdout, "access=%s\n", report.Plan.Access)
+	if report.Plan.Index != "" {
+		fmt.Fprintf(stdout, "index=%s\n", report.Plan.Index)
+	}
+	fmt.Fprintf(stdout, "rows_scanned=%d\n", report.RowsScanned)
+	fmt.Fprintf(stdout, "rows_matched=%d\n", report.RowsMatched)
+	fmt.Fprintf(stdout, "rows_returned=%d\n", report.RowsReturned)
+	fmt.Fprintf(stdout, "total_time=%s\n", report.TotalTime)
+	rows := make([][]string, 0, len(report.Stages))
+	for _, stage := range report.Stages {
+		rows = append(rows, []string{stage.Name, formatStageRowsIn(stage), fmt.Sprintf("%d", stage.RowsOut), stage.Duration.String()})
+	}
+	printStringTable(stdout, []string{"stage", "rows_in", "rows_out", "time"}, rows)
+}
+
+func printDemoLogicalRows(stdout io.Writer, path string, limit int) error {
+	info, err := debug.InspectTable(path, "users")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "decoded logical row sample")
+	count := limit
+	if len(info.Rows) < count {
+		count = len(info.Rows)
+	}
+	for i := 0; i < count; i++ {
+		fmt.Fprintf(stdout, "row=%s\n", formatRecord(info.Columns, info.Rows[i]))
+	}
+	if len(info.Rows) > count {
+		fmt.Fprintf(stdout, "rows_omitted=%d\n", len(info.Rows)-count)
+	}
+	return nil
+}
+
+func sampleUint64s(values []uint64, limit int) []uint64 {
+	if len(values) <= limit {
+		return append([]uint64(nil), values...)
+	}
+	return append([]uint64(nil), values[:limit]...)
+}
+
+func samplePages(pages []debug.PageInfo, limit int) []debug.PageInfo {
+	if len(pages) <= limit {
+		return append([]debug.PageInfo(nil), pages...)
+	}
+	return append([]debug.PageInfo(nil), pages[:limit]...)
+}
+
+func firstInspectablePage(pages []debug.PageInfo) uint64 {
+	for _, page := range pages {
+		if page.Kind == "btree_leaf" || page.Kind == "btree_internal" || page.Kind == "freelist_head" || page.Kind == "freelist" {
+			return page.ID
+		}
+	}
+	return 0
+}
+
+func demoStatus(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "failed"
+}
+
+func formatStageRowsIn(stage sql.AnalyzeStage) string {
+	if stage.RowsIn < 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d", stage.RowsIn)
+}
+
+func formatReduction(before, after int) string {
+	if before <= 0 || after <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1fx", float64(before)/float64(after))
+}
+
+func formatDurationRatio(before, after time.Duration) string {
+	if before <= 0 || after <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1fx", float64(before)/float64(after))
 }
 
 func runShell(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -185,6 +616,29 @@ func runExplainAnalyze(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runTrace(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprint(stderr, "sceptre trace: expected <db-path> and <select>\n\n")
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	db, err := table.Open(args[0], table.Options{})
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre trace: open: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	report, err := sql.Analyze(db, strings.Join(args[1:], " "))
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre trace: %v\n", err)
+		return 1
+	}
+	printTraceReport(stdout, report)
+	return 0
+}
+
 func runShellCommand(db *table.DB, line string, stdout io.Writer) error {
 	switch line {
 	case ".help":
@@ -253,13 +707,19 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 }
 
 func runCrashTest(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprint(stderr, "sceptre crash-test: expected <db-path>\n\n")
+	opts, err := parseCrashTestArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "sceptre crash-test: %v\n\n", err)
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
 
-	report, err := debug.CrashTest(args[0])
+	var report debug.CrashReport
+	if opts.randomCases > 0 {
+		report, err = debug.RandomCrashTest(opts.path, opts.randomCases, opts.seed)
+	} else {
+		report, err = debug.CrashTest(opts.path)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "sceptre crash-test: %v\n", err)
 		return 1
@@ -269,6 +729,49 @@ func runCrashTest(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+type crashTestOptions struct {
+	path        string
+	randomCases int
+	seed        int64
+}
+
+func parseCrashTestArgs(args []string) (crashTestOptions, error) {
+	if len(args) == 0 {
+		return crashTestOptions{}, fmt.Errorf("expected <db-path>")
+	}
+	opts := crashTestOptions{path: args[0]}
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--random":
+			if i+1 >= len(args) {
+				return crashTestOptions{}, fmt.Errorf("--random expects a case count")
+			}
+			cases, err := strconv.Atoi(args[i+1])
+			if err != nil || cases <= 0 {
+				return crashTestOptions{}, fmt.Errorf("--random must be a positive integer")
+			}
+			opts.randomCases = cases
+			i++
+		case "--seed":
+			if i+1 >= len(args) {
+				return crashTestOptions{}, fmt.Errorf("--seed expects a value")
+			}
+			seed, err := strconv.ParseInt(args[i+1], 10, 64)
+			if err != nil {
+				return crashTestOptions{}, fmt.Errorf("--seed must be an integer")
+			}
+			opts.seed = seed
+			i++
+		default:
+			return crashTestOptions{}, fmt.Errorf("unknown option %q", args[i])
+		}
+	}
+	if opts.seed != 0 && opts.randomCases == 0 {
+		return crashTestOptions{}, fmt.Errorf("--seed requires --random")
+	}
+	return opts, nil
 }
 
 func runInspect(args []string, stdout, stderr io.Writer) int {
@@ -533,22 +1036,58 @@ func printExplainResult(stdout io.Writer, plan sql.Plan) {
 }
 
 func printAnalyzeReport(stdout io.Writer, report sql.AnalyzeReport) {
-	printExplainResult(stdout, report.Plan)
-	fmt.Fprintf(stdout, "rows_scanned=%d\n", report.RowsScanned)
-	fmt.Fprintf(stdout, "rows_matched=%d\n", report.RowsMatched)
-	fmt.Fprintf(stdout, "rows_returned=%d\n", report.RowsReturned)
-	fmt.Fprintf(stdout, "total_time=%s\n", report.TotalTime)
-
-	rows := make([][]string, 0, len(report.Stages))
-	for _, stage := range report.Stages {
-		rows = append(rows, []string{
-			stage.Name,
-			fmt.Sprintf("%d", stage.RowsIn),
-			fmt.Sprintf("%d", stage.RowsOut),
-			stage.Duration.String(),
-		})
+	fmt.Fprintln(stdout, "plan")
+	fmt.Fprintf(stdout, "  statement: %s\n", report.Plan.Statement)
+	fmt.Fprintf(stdout, "  table: %s\n", report.Plan.Table)
+	fmt.Fprintf(stdout, "  access: %s\n", report.Plan.Access)
+	if report.Plan.Index != "" {
+		fmt.Fprintf(stdout, "  index: %s\n", report.Plan.Index)
 	}
-	printStringTable(stdout, []string{"stage", "rows_in", "rows_out", "time"}, rows)
+	if len(report.Plan.Lookup) > 0 {
+		parts := make([]string, 0, len(report.Plan.Lookup))
+		for _, condition := range report.Plan.Lookup {
+			parts = append(parts, sqlFormatCondition(condition))
+		}
+		fmt.Fprintf(stdout, "  lookup: %s\n", strings.Join(parts, ", "))
+	}
+	if report.Plan.Lower != nil {
+		fmt.Fprintf(stdout, "  lower: %s\n", sqlFormatCondition(*report.Plan.Lower))
+	}
+	if report.Plan.Upper != nil {
+		fmt.Fprintf(stdout, "  upper: %s\n", sqlFormatCondition(*report.Plan.Upper))
+	}
+	fmt.Fprintf(stdout, "  residual: %s\n", sql.FormatExpr(report.Plan.Residual))
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "execution")
+	fmt.Fprintf(stdout, "  rows_scanned: %d\n", report.RowsScanned)
+	fmt.Fprintf(stdout, "  rows_matched: %d\n", report.RowsMatched)
+	fmt.Fprintf(stdout, "  rows_returned: %d\n", report.RowsReturned)
+	fmt.Fprintf(stdout, "  total_time: %s\n", report.TotalTime)
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "stages")
+	for _, stage := range report.Stages {
+		fmt.Fprintf(stdout, "  %s\n", stage.Name)
+		if stage.RowsIn >= 0 {
+			fmt.Fprintf(stdout, "    rows_in: %d\n", stage.RowsIn)
+		}
+		fmt.Fprintf(stdout, "    rows_out: %d\n", stage.RowsOut)
+		fmt.Fprintf(stdout, "    time: %s\n", stage.Duration)
+	}
+}
+
+func printTraceReport(stdout io.Writer, report sql.AnalyzeReport) {
+	fmt.Fprintf(stdout, "trace table=%s access=%s\n", report.Plan.Table, report.Plan.Access)
+	if report.Plan.Index != "" {
+		fmt.Fprintf(stdout, "using index=%s\n", report.Plan.Index)
+	}
+	for i, stage := range report.Stages {
+		if stage.RowsIn < 0 {
+			fmt.Fprintf(stdout, "%d. %s -> %d row(s) in %s\n", i+1, stage.Name, stage.RowsOut, stage.Duration)
+			continue
+		}
+		fmt.Fprintf(stdout, "%d. %s: %d row(s) in -> %d row(s) out in %s\n", i+1, stage.Name, stage.RowsIn, stage.RowsOut, stage.Duration)
+	}
+	fmt.Fprintf(stdout, "result: scanned %d, matched %d, returned %d in %s\n", report.RowsScanned, report.RowsMatched, report.RowsReturned, report.TotalTime)
 }
 
 func printCheckResult(stdout io.Writer, report table.CheckReport) {
@@ -611,6 +1150,12 @@ func printCrashReport(stdout io.Writer, report debug.CrashReport) {
 		status = "failed"
 	}
 	fmt.Fprintf(stdout, "status=%s\n", status)
+	if report.Mode != "" {
+		fmt.Fprintf(stdout, "mode=%s\n", report.Mode)
+	}
+	if report.Seed != 0 {
+		fmt.Fprintf(stdout, "seed=%d\n", report.Seed)
+	}
 	fmt.Fprintf(stdout, "work_dir=%s\n", report.WorkDir)
 	fmt.Fprintf(stdout, "cases=%d\n", len(report.Cases))
 	for _, crashCase := range report.Cases {

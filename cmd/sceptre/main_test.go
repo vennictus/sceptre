@@ -23,6 +23,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	if !strings.Contains(stdout.String(), "sceptre sql <db-path>") {
 		t.Fatalf("run() stdout = %q, want sql usage", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "sceptre demo") {
+		t.Fatalf("run() stdout = %q, want demo usage", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "sceptre shell <db-path>") {
 		t.Fatalf("run() stdout = %q, want shell usage", stdout.String())
 	}
@@ -31,6 +34,9 @@ func TestRunPrintsUsageWithoutArgs(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "sceptre explain-analyze <db-path>") {
 		t.Fatalf("run() stdout = %q, want explain-analyze usage", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "sceptre trace <db-path>") {
+		t.Fatalf("run() stdout = %q, want trace usage", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "sceptre check <db-path>") {
 		t.Fatalf("run() stdout = %q, want check usage", stdout.String())
@@ -85,6 +91,69 @@ func TestRunSQLExecutesStatements(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "1   Ada") {
 		t.Fatalf("run(sql select) stdout = %q, want row", stdout.String())
+	}
+}
+
+func TestRunDemoPrintsEndToEndSummary(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "demo.db")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run([]string{"demo", path, "--rows", "20"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(demo) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Sceptre guided demo") {
+		t.Fatalf("run(demo) stdout = %q, want demo heading", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "loading generated rows; no input required") {
+		t.Fatalf("run(demo) stdout = %q, want loading note", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "batch_size=20") {
+		t.Fatalf("run(demo) stdout = %q, want batch size", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "loaded=20/20") {
+		t.Fatalf("run(demo) stdout = %q, want load progress", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "without_index") || !strings.Contains(stdout.String(), "with_index") {
+		t.Fatalf("run(demo) stdout = %q, want index comparison", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "takeaway: index reduced scanned rows") {
+		t.Fatalf("run(demo) stdout = %q, want index takeaway", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "decoded logical row sample") {
+		t.Fatalf("run(demo) stdout = %q, want decoded row sample", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "free_page_count=") {
+		t.Fatalf("run(demo) stdout = %q, want freelist summary", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "freelist: deleted rows retire old pages") {
+		t.Fatalf("run(demo) stdout = %q, want freelist explanation", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "crash_recovery=ok") {
+		t.Fatalf("run(demo) stdout = %q, want crash recovery summary", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "consistency check ok") {
+		t.Fatalf("run(demo) stdout = %q, want consistency summary", stdout.String())
+	}
+}
+
+func TestRunDemoRefusesExistingDatabaseWithoutForce(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "demo.db")
+	runOK(t, []string{"sql", path, "create table users (id int64, primary key (id))"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"demo", path, "--rows", "20"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run(demo existing) exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "already exists") {
+		t.Fatalf("run(demo existing) stderr = %q, want existing database warning", stderr.String())
 	}
 }
 
@@ -296,20 +365,45 @@ func TestRunExplainAnalyzePrintsExecutionCounters(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(explain-analyze) exit code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "access=secondary_index_lookup") {
+	if !strings.Contains(stdout.String(), "access: secondary_index_lookup") {
 		t.Fatalf("run(explain-analyze) stdout = %q, want access path", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "rows_scanned=1") {
+	if !strings.Contains(stdout.String(), "rows_scanned: 1") {
 		t.Fatalf("run(explain-analyze) stdout = %q, want scanned counter", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "rows_matched=1") {
+	if !strings.Contains(stdout.String(), "rows_matched: 1") {
 		t.Fatalf("run(explain-analyze) stdout = %q, want matched counter", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "rows_returned=1") {
+	if !strings.Contains(stdout.String(), "rows_returned: 1") {
 		t.Fatalf("run(explain-analyze) stdout = %q, want returned counter", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "filter_project") {
 		t.Fatalf("run(explain-analyze) stdout = %q, want stage table", stdout.String())
+	}
+}
+
+func TestRunTracePrintsRowFlow(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	runOK(t, []string{"sql", path, "create table users (id int64, name bytes, age int64, primary key (id))"})
+	runOK(t, []string{"sql", path, "create index users_age on users (age)"})
+	runOK(t, []string{"sql", path, "insert into users (id, name, age) values (1, 'Ada', 31)"})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"trace", path, "select id, name from users where age = 31"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(trace) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "trace table=users access=secondary_index_lookup") {
+		t.Fatalf("run(trace) stdout = %q, want trace heading", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "secondary_index_lookup -> 1 row(s)") {
+		t.Fatalf("run(trace) stdout = %q, want row flow", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "returned 1") {
+		t.Fatalf("run(trace) stdout = %q, want result summary", stdout.String())
 	}
 }
 
@@ -355,6 +449,9 @@ func TestRunCrashTestPrintsRecoveryReport(t *testing.T) {
 	if !strings.Contains(stdout.String(), "cases=9") {
 		t.Fatalf("run(crash-test) stdout = %q, want nine cases", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "mode=matrix") {
+		t.Fatalf("run(crash-test) stdout = %q, want matrix mode", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "case=pages-written") {
 		t.Fatalf("run(crash-test) stdout = %q, want pages-written case", stdout.String())
 	}
@@ -363,6 +460,31 @@ func TestRunCrashTestPrintsRecoveryReport(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "operation=update") || !strings.Contains(stdout.String(), "operation=delete") {
 		t.Fatalf("run(crash-test) stdout = %q, want update and delete operations", stdout.String())
+	}
+}
+
+func TestRunCrashTestRandomMode(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"crash-test", path, "--random", "4", "--seed", "7"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(crash-test random) exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "status=ok") {
+		t.Fatalf("run(crash-test random) stdout = %q, want ok status", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "mode=random") {
+		t.Fatalf("run(crash-test random) stdout = %q, want random mode", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "seed=7") {
+		t.Fatalf("run(crash-test random) stdout = %q, want seed", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "cases=4") {
+		t.Fatalf("run(crash-test random) stdout = %q, want case count", stdout.String())
 	}
 }
 

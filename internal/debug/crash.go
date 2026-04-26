@@ -2,11 +2,13 @@ package debug
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sceptre/internal/kv"
 	"sceptre/internal/table"
 	"strings"
+	"time"
 )
 
 type CrashCase struct {
@@ -22,6 +24,8 @@ type CrashCase struct {
 
 type CrashReport struct {
 	WorkDir string
+	Mode    string
+	Seed    int64
 	Cases   []CrashCase
 }
 
@@ -48,7 +52,7 @@ func CrashTest(path string) (CrashReport, error) {
 		return CrashReport{}, err
 	}
 
-	report := CrashReport{WorkDir: workDir}
+	report := CrashReport{WorkDir: workDir, Mode: "matrix"}
 	for _, stage := range kv.CommitStageNames() {
 		for _, operation := range []string{"insert", "update", "delete"} {
 			casePath := filepath.Join(workDir, sanitizeStage(stage)+"_"+operation+".db")
@@ -58,6 +62,41 @@ func CrashTest(path string) (CrashReport, error) {
 			}
 			report.Cases = append(report.Cases, crashCase)
 		}
+	}
+	return report, nil
+}
+
+func RandomCrashTest(path string, cases int, seed int64) (CrashReport, error) {
+	if cases <= 0 {
+		return CrashReport{}, fmt.Errorf("random crash cases must be positive")
+	}
+	if seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+
+	parent := filepath.Dir(path)
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if base == "" || base == "." {
+		base = "sceptre"
+	}
+	workDir, err := os.MkdirTemp(parent, base+".crash-random-*")
+	if err != nil {
+		return CrashReport{}, err
+	}
+
+	stages := kv.CommitStageNames()
+	operations := []string{"insert", "update", "delete"}
+	rng := rand.New(rand.NewSource(seed))
+	report := CrashReport{WorkDir: workDir, Mode: "random", Seed: seed}
+	for i := 0; i < cases; i++ {
+		stage := stages[rng.Intn(len(stages))]
+		operation := operations[rng.Intn(len(operations))]
+		casePath := filepath.Join(workDir, fmt.Sprintf("case_%03d_%s_%s.db", i+1, sanitizeStage(stage), operation))
+		crashCase, err := runCrashCase(casePath, stage, operation)
+		if err != nil {
+			return report, err
+		}
+		report.Cases = append(report.Cases, crashCase)
 	}
 	return report, nil
 }
