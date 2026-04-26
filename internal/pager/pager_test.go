@@ -50,6 +50,19 @@ func TestOpenInitializesNewFileAndReopens(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsConcurrentOwner(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	p := mustOpenPager(t, path)
+	defer p.Close()
+
+	_, err := Open(path, Options{})
+	if !errors.Is(err, ErrDatabaseLocked) {
+		t.Fatalf("Open() error = %v, want %v", err, ErrDatabaseLocked)
+	}
+}
+
 func TestWritePageDoesNotPublishPageCountBeforeMeta(t *testing.T) {
 	t.Parallel()
 

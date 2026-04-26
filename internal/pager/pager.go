@@ -11,6 +11,7 @@ var (
 	ErrInvalidPageSize   = fmt.Errorf("pager: page size must be at least %d bytes", metaHeaderSize)
 	ErrFileTooSmall      = errors.New("pager: file too small for meta pages")
 	ErrNoValidMetaPage   = errors.New("pager: no valid meta page found")
+	ErrDatabaseLocked    = errors.New("pager: database is already open")
 	ErrReservedPageID    = errors.New("pager: page id is reserved for meta pages")
 	ErrPageNotAllocated  = errors.New("pager: page id not allocated")
 	ErrInvalidPageBuffer = errors.New("pager: page buffer size mismatch")
@@ -26,7 +27,9 @@ type Options struct {
 // Pager owns the database file and the currently selected meta page.
 type Pager struct {
 	path       string
+	lockPath   string
 	file       *os.File
+	lock       *os.File
 	pageSize   uint32
 	meta       Meta
 	activeSlot int
@@ -34,17 +37,26 @@ type Pager struct {
 
 // Open opens an existing pager file or initializes a new one.
 func Open(path string, opts Options) (*Pager, error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
+	lock, lockPath, err := acquireLock(path)
 	if err != nil {
 		return nil, err
 	}
 
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
+	if err != nil {
+		releaseLock(lock, lockPath)
+		return nil, err
+	}
+
 	pager := &Pager{
-		path: path,
-		file: file,
+		path:     path,
+		lockPath: lockPath,
+		file:     file,
+		lock:     lock,
 	}
 	if err := pager.open(opts); err != nil {
 		file.Close()
+		releaseLock(lock, lockPath)
 		return nil, err
 	}
 	return pager, nil
@@ -55,7 +67,14 @@ func (p *Pager) Close() error {
 	if p == nil || p.file == nil {
 		return nil
 	}
-	return p.file.Close()
+	fileErr := p.file.Close()
+	p.file = nil
+	lockErr := releaseLock(p.lock, p.lockPath)
+	p.lock = nil
+	if fileErr != nil {
+		return fileErr
+	}
+	return lockErr
 }
 
 // Path returns the filesystem path backing the pager.
@@ -257,6 +276,37 @@ func (p *Pager) metaOffset(slot int, pageSize uint32) int64 {
 
 func (p *Pager) pageOffset(pageID uint64) int64 {
 	return int64(pageID) * int64(p.pageSize)
+}
+
+func acquireLock(path string) (*os.File, string, error) {
+	lockPath := path + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, lockPath, fmt.Errorf("%w: %s", ErrDatabaseLocked, lockPath)
+		}
+		return nil, lockPath, err
+	}
+	if _, err := fmt.Fprintf(lock, "pid=%d\n", os.Getpid()); err != nil {
+		releaseLock(lock, lockPath)
+		return nil, lockPath, err
+	}
+	return lock, lockPath, nil
+}
+
+func releaseLock(lock *os.File, lockPath string) error {
+	var closeErr error
+	if lock != nil {
+		closeErr = lock.Close()
+	}
+	removeErr := os.Remove(lockPath)
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return removeErr
 }
 
 func readPageSize(header []byte) uint32 {

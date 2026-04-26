@@ -13,6 +13,7 @@ coverage.out
 
 # Local demo databases
 *.db
+*.db.lock
 *.crash-*/
 
 # Local Go cache / temp dirs
