@@ -2,11 +2,12 @@ package debug
 
 import (
 	"fmt"
-	"sceptre/internal/btree"
-	"sceptre/internal/freelist"
-	"sceptre/internal/kv"
-	"sceptre/internal/pager"
-	"sceptre/internal/table"
+
+	"github.com/vennictus/sceptre/internal/btree"
+	"github.com/vennictus/sceptre/internal/freelist"
+	"github.com/vennictus/sceptre/internal/kv"
+	"github.com/vennictus/sceptre/internal/pager"
+	"github.com/vennictus/sceptre/internal/table"
 )
 
 type MetaInfo struct {

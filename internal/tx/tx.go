@@ -2,9 +2,10 @@ package tx
 
 import (
 	"errors"
-	"sceptre/internal/btree"
-	"sceptre/internal/kv"
 	"sync"
+
+	"github.com/vennictus/sceptre/internal/btree"
+	"github.com/vennictus/sceptre/internal/kv"
 )
 
 var (

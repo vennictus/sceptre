@@ -1,8 +1,8 @@
 package sql
 
 import (
+	"github.com/vennictus/sceptre/internal/table"
 	"path/filepath"
-	"sceptre/internal/table"
 	"testing"
 )
 

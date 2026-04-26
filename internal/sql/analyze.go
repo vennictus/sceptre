@@ -2,7 +2,7 @@ package sql
 
 import (
 	"fmt"
-	"sceptre/internal/table"
+	"github.com/vennictus/sceptre/internal/table"
 	"time"
 )
 

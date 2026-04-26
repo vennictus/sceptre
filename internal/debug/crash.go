@@ -5,10 +5,11 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sceptre/internal/kv"
-	"sceptre/internal/table"
 	"strings"
 	"time"
+
+	"github.com/vennictus/sceptre/internal/kv"
+	"github.com/vennictus/sceptre/internal/table"
 )
 
 type CrashCase struct {

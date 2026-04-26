@@ -2,10 +2,11 @@ package kv
 
 import (
 	"fmt"
-	"sceptre/internal/btree"
-	"sceptre/internal/freelist"
-	"sceptre/internal/pager"
 	"sort"
+
+	"github.com/vennictus/sceptre/internal/btree"
+	"github.com/vennictus/sceptre/internal/freelist"
+	"github.com/vennictus/sceptre/internal/pager"
 )
 
 // Options controls how the KV layer initializes its backing pager.

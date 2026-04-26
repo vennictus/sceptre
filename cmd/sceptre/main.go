@@ -6,13 +6,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sceptre/internal/debug"
-	"sceptre/internal/sql"
-	"sceptre/internal/table"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vennictus/sceptre/internal/debug"
+	"github.com/vennictus/sceptre/internal/sql"
+	"github.com/vennictus/sceptre/internal/table"
 )
 
 const usage = `sceptre is an embedded relational database engine.

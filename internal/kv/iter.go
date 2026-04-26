@@ -1,6 +1,6 @@
 package kv
 
-import "sceptre/internal/btree"
+import "github.com/vennictus/sceptre/internal/btree"
 
 // Iterator walks the current committed KV snapshot in key order.
 type Iterator struct {

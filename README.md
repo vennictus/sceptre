@@ -13,6 +13,7 @@
 [![CI](https://github.com/vennictus/sceptre/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vennictus/sceptre/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vennictus/sceptre)](https://goreportcard.com/report/github.com/vennictus/sceptre)
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
   <strong>Single-file storage | B+ tree indexes | Query tracing | Page inspection | Crash recovery checks</strong>
@@ -21,6 +22,7 @@
 ---
 
 [Quick Start](#quick-start) |
+[Installation](#installation) |
 [Features](#features) |
 [Command Reference](#command-reference) |
 [Documentation](#documentation) |
@@ -65,6 +67,22 @@ If a demo database already exists, Sceptre refuses to overwrite it. Use
 ```bash
 go run ./cmd/sceptre demo quick.db --rows 1000 --force
 ```
+
+---
+
+## Installation
+
+```bash
+# Install the CLI
+go install github.com/vennictus/sceptre/cmd/sceptre@latest
+
+# Or clone and run from source
+git clone https://github.com/vennictus/sceptre.git
+cd sceptre
+go run ./cmd/sceptre demo
+```
+
+**Requirements:** Go 1.22 or higher.
 
 ---
 

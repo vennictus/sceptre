@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sceptre/internal/kv"
+	"github.com/vennictus/sceptre/internal/kv"
 )
 
 type Type uint32

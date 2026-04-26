@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"sceptre/internal/btree"
-	"sceptre/internal/freelist"
-	"sceptre/internal/pager"
 	"sort"
 	"strings"
+
+	"github.com/vennictus/sceptre/internal/btree"
+	"github.com/vennictus/sceptre/internal/freelist"
+	"github.com/vennictus/sceptre/internal/pager"
 )
 
 // CheckIssue describes one consistency problem found in a table database.

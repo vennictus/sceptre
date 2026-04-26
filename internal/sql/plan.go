@@ -3,8 +3,9 @@ package sql
 import (
 	"bytes"
 	"fmt"
-	"sceptre/internal/table"
 	"strings"
+
+	"github.com/vennictus/sceptre/internal/table"
 )
 
 type AccessPath string

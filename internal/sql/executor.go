@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"sceptre/internal/table"
+
+	"github.com/vennictus/sceptre/internal/table"
 )
 
 var ErrExec = errors.New("sql: execution error")
