@@ -262,6 +262,6 @@ commands, consistency checks, tracing, and project documentation.
 
 **Built with Go**
 
-[Back to top](#sceptre)
+[Back to top](#what-is-sceptre)
 
 </div>
