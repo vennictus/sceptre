@@ -1,11 +1,12 @@
 <div align="center">
 
 <pre>
- ____   ____ _____ ____ _____ ____  _____
+ ____   ____ _____ ____ _____ ____  _____ 
 / ___| / ___| ____|  _ \_   _|  _ \| ____|
-\___ \| |   |  _| | |_) || | | |_) |  _|
- ___) | |___| |___|  __/ | | |  _ <| |___
-|____/ \____|_____|_|    |_| |_| \_\_____|
+\___ \| |   |  _| | |_) || | | |_) |  _|  
+ ___) | |___| |___|  __/ | | |  _ <| |___ 
+ |____/ \____|_____|_|    |_| |_| \_\_____| 
+  
 </pre>
 
 **A transparent embedded relational database engine built in Go**
@@ -37,9 +38,9 @@ disk pages up to a small SQL layer. It is designed to make database internals
 visible: you can run a query, see the access path, inspect the B+ tree pages,
 view freelist state, and validate recovery behavior from the CLI.
 
-It is not a SQLite replacement. It is a focused engine for studying and
+It is a focused engine for studying and
 demonstrating storage, indexing, query execution, consistency, and recovery in
-one readable Go codebase.
+one readable Go codebase with a built in interactive shell.
 
 ---
 
@@ -181,9 +182,9 @@ reliability: consistency check ok; crash recovery ok across 9 cases
 Sceptre intentionally supports a small SQL subset:
 
 ```sql
-CREATE TABLE users (id int64, name bytes, age int64, PRIMARY KEY (id));
+CREATE TABLE users (id int64, name bytes, age int64, city bytes, PRIMARY KEY (id));
 CREATE INDEX users_age ON users (age);
-INSERT INTO users (id, name, age) VALUES (1, 'Ada', 31);
+INSERT INTO users (id, name, age, city) VALUES (1, 'Ada', 31, 'delhi');
 SELECT id, name FROM users WHERE age = 31;
 UPDATE users SET age = 32 WHERE id = 1;
 DELETE FROM users WHERE id = 1;
