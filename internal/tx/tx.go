@@ -44,6 +44,7 @@ type Tx struct {
 	writes   map[string]struct{}
 	order    []string
 	closed   bool
+	scanned  bool
 }
 
 // NewManager creates a transaction manager for a KV store.
@@ -273,7 +274,7 @@ func (m *Manager) detectConflict(tx *Tx) bool {
 		if committed.version <= tx.version {
 			break
 		}
-		if committed.allKeys || setsOverlap(tx.reads, committed.writes) || setsOverlap(tx.writes, committed.writes) {
+		if committed.allKeys || (tx.scanned && len(committed.writes) > 0) || setsOverlap(tx.reads, committed.writes) || setsOverlap(tx.writes, committed.writes) {
 			return true
 		}
 	}

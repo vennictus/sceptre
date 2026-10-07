@@ -80,7 +80,7 @@ func (db *DB) Scan(tableName string, bounds ScanBounds) (*Scanner, error) {
 		upperInclusive = bounds.Upper.Inclusive
 	}
 
-	iter := db.kv.Iterator()
+	iter := db.store.ScanIterator()
 	if err := iter.SeekGE(lower); err != nil {
 		return nil, err
 	}

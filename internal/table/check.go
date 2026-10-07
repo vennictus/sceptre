@@ -103,14 +103,14 @@ func (db *DB) Check() (CheckReport, error) {
 
 // Tables returns all persisted table definitions sorted by name.
 func (db *DB) Tables() ([]TableDef, error) {
-	if db == nil || db.kv == nil {
+	if db == nil || db.store == nil {
 		return nil, ErrTableNotFound
 	}
 	return db.tables()
 }
 
 func (db *DB) tables() ([]TableDef, error) {
-	iter := db.kv.Iterator()
+	iter := db.store.ScanIterator()
 	if err := iter.SeekGE(catalogTableStart); err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func (db *DB) tables() ([]TableDef, error) {
 }
 
 func (db *DB) loadNextTablePrefix() (uint32, bool, error) {
-	value, ok, err := db.kv.Get(catalogMetaKey)
+	value, ok, err := db.store.Get(catalogMetaKey)
 	if err != nil || !ok {
 		return 0, ok, err
 	}
@@ -193,7 +193,7 @@ func (db *DB) checkRows(def TableDef, expectedIndexKeys map[string]string) (int,
 }
 
 func (db *DB) checkRawKeys(defs []TableDef, prefixes prefixSet, expectedIndexKeys map[string]string, seenIndexKeys map[string]struct{}, report *CheckReport) error {
-	iter := db.kv.Iterator()
+	iter := db.store.ScanIterator()
 	if err := iter.SeekFirst(); err != nil {
 		return err
 	}
