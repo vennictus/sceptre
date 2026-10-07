@@ -20,6 +20,10 @@ coverage.out
 .gocache/
 .gotmp/
 
+# Reproducible validation output (not source)
+/test-artifacts/
+/benchmark-results/
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db
