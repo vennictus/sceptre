@@ -45,12 +45,16 @@ single database file
 
 ## File Ownership
 
-The pager creates a sidecar lock file beside the database. A second Sceptre
-process opening the same database receives a lock error. This matches the
-current design assumption: one process owns the database file.
+The pager locks the database file itself: an exclusive nonblocking byte-range
+lock on Windows, or an advisory flock on supported Unix platforms. A second
+Sceptre owner, including a hard-link alias, receives a lock error. Closing the
+handle or terminating its process releases ownership automatically. Legacy
+sidecar `.lock` files are ignored and are not removed by the engine.
 
-If a process is killed abruptly, a stale `.lock` file may remain and must be
-removed manually after confirming no process still owns the database.
+This assumes a local filesystem with working OS locks. Unix advisory locking
+does not prevent unrelated programs from ignoring the lock. Renaming or replacing
+an open database file, network filesystems, and mixed old/new binaries operating
+on the same file are outside the supported ownership contract.
 
 ## File Format
 
@@ -72,13 +76,19 @@ The active meta page stores:
 On open, both meta pages are validated and the valid page with the highest
 generation is selected.
 
+Before serving queries, the selected tree is checked for valid cells and slots,
+ordered disjoint key ranges, exact child-maximum separators, consistent leaf
+depth, and cycles or repeated children. Its freelist is checked for reserved or
+out-of-bounds IDs, duplicates, and overlap with live tree or freelist pages.
+Invalid selected state is rejected rather than exposed to queries.
+
 ## Commit Protocol
 
 A KV mutation batch commits by publishing a new durable root:
 
-1. Apply mutations to the in-memory B+ tree.
+1. Apply mutations to a private in-memory B+ tree, preserving existing iterators.
 2. Build a durable tree snapshot.
-3. Allocate page IDs, reusing freelist pages when possible.
+3. Allocate page IDs, withholding pages needed by either valid metadata slot.
 4. Write tree and freelist pages.
 5. `fsync` page writes.
 6. Publish the next meta page with a higher generation.
@@ -87,6 +97,25 @@ A KV mutation batch commits by publishing a new durable root:
 The meta page is the visibility point. If the new meta page is not published,
 reopen selects the previous durable state. If it is published, reopen selects
 the new state.
+
+Tree and freelist pages of the other valid metadata generation remain protected
+until the next publication replaces its slot. Retired pages may appear in the
+freelist but are withheld from allocation while that generation needs them.
+Repeated updates still reuse space after this retention window. Deletion can
+split internal pages when variable-length replacement separators grow.
+
+Data-write and data-sync failures before metadata publication roll back the
+in-process state. A short or failed metadata write, or a metadata-sync error,
+has an uncertain outcome: the KV handle returns `ErrRecoveryRequired` and rejects
+new reads/writes until it is closed and reopened. Reopen selects a complete valid
+generation. The after-publication interruption hook returns `ErrCommitCommitted`;
+the complete batch is already visible and must not be retried as an aborted write.
+
+The file layout remains version 1. These fixes do not repair corruption or undo
+incorrect writes produced by older binaries. The retention guarantee applies to
+commits made by this implementation; existing files must pass open-time checks.
+Data pages do not yet carry checksums, so structurally valid arbitrary byte
+corruption is not guaranteed to be detected.
 
 ## Storage Model
 
@@ -140,10 +169,10 @@ commit. Zero-match mutations do not advance the metadata generation. These are
 statement boundaries, not SQL BEGIN/COMMIT/ROLLBACK support. Callers must serialize
 access to the table/SQL engine; concurrent application requests are not yet safe.
 
-An error is not proof of rollback: the meta-published interruption hook runs after
-the complete batch has committed. Earlier supported interruption stages preserve
-the previous statement state. Arbitrary I/O-error outcomes still require a
-broader recovery contract and fault testing.
+An error is not proof of rollback. The commit outcomes above also apply to SQL
+statements. Tests exercise short writes, data and metadata sync failures, and
+deterministic interruption stages; these do not model every storage device or
+power-loss behavior.
 
 ## Transactions
 
@@ -159,6 +188,14 @@ broader recovery contract and fault testing.
 These primitives are internal. Sceptre does not currently expose SQL
 `BEGIN`/`COMMIT`/`ROLLBACK`.
 
+Managed transactions record conflict history and close a writer even when a
+post-publication hook reports an already committed outcome. An uncertain
+publication blocks transaction operations until reopen. Serialized writes made
+outside a manager conservatively conflict with its older snapshots when the
+manager observes the new pager generation. History is pruned when no active
+snapshot needs it; long-lived snapshots can still retain history and tree copies.
+Raw KV access and multiple managers must be serialized by the caller.
+
 ## Consistency Checking
 
 `sceptre check` validates:
@@ -167,6 +204,7 @@ These primitives are internal. Sceptre does not currently expose SQL
 - row encoding
 - secondary-index entries
 - B+ tree page shape
+- routing separators, key ranges, cycles, and consistent leaf depth
 - page bounds
 - freelist validity
 - reachable/free-page overlap

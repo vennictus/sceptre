@@ -125,7 +125,7 @@ go run ./cmd/sceptre demo
 - **Consistency checker** for schemas, rows, indexes, pages, and freelist state
 - **Commit interruption tests** at page-write, sync, and meta-publish stages
 - **Randomized recovery sampling** with reproducible seeds
-- **Single-process ownership lock** to prevent concurrent writers
+- **OS ownership lock** released automatically on process exit
 
 </td>
 </tr>
@@ -206,6 +206,14 @@ commit. Validation and oversized-record failures preserve the previous statement
 state. This does not provide multi-statement transactions or concurrent request
 safety: callers must serialize engine access. A commit error after metadata
 publication can still mean the complete statement was committed.
+
+Open rejects unsafe freelists and invalid B+tree routing graphs. Allocation
+protects both valid metadata generations during page reuse, and existing KV
+iterators retain their committed snapshot across writes. Uncertain metadata I/O
+errors require closing and reopening the handle before further operations.
+Regression coverage includes torn writes, sync failures, subprocess exits,
+metadata fallback after repeated reuse, and seeded indexed CRUD workloads.
+The detailed supported boundaries are in [PRODUCT_SPEC.md](PRODUCT_SPEC.md).
 
 ---
 

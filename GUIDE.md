@@ -55,6 +55,12 @@ error can still occur after the complete statement has been published; do not
 assume every error means rollback. SQL transactions spanning several statements
 and concurrent engine access remain unsupported.
 
+The OS releases database ownership when a process exits, so restart does not
+require removing a stale lock file. If an operation reports `ErrRecoveryRequired`,
+close and reopen the database before retrying or querying it. Reopening determines
+which complete generation was published. `ErrCommitCommitted` means the operation
+already committed despite the reported error.
+
 ## 3. Add And Use An Index
 
 ```bash
