@@ -3,16 +3,25 @@ package table
 import (
 	"errors"
 	"fmt"
-	"math/rand"
+	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
 func TestIndexedWorkloadAcrossPageReuseAndReopen(t *testing.T) {
 	t.Parallel()
-	for _, seed := range []int64{1, 7, 42, 2026} {
-		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+	histories := []workloadHistory{generatedHistory(1), generatedHistory(7), generatedHistory(42), generatedHistory(2026)}
+	if path := os.Getenv("SCEPTRE_WORKLOAD_REPLAY"); path != "" {
+		h, err := readHistory(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		histories = []workloadHistory{h}
+	}
+	for _, history := range histories {
+		t.Run(fmt.Sprint(history.Seed), func(t *testing.T) {
+			executed := workloadHistory{Version: 1, Seed: history.Seed, PageSize: 512}
+			t.Cleanup(func() { persistFailure(t, &executed) })
 			path := filepath.Join(t.TempDir(), "db")
 			db, err := Open(path, Options{PageSize: 512})
 			if err != nil {
@@ -26,7 +35,6 @@ func TestIndexedWorkloadAcrossPageReuseAndReopen(t *testing.T) {
 				t.Fatal(err)
 			}
 			oracle := make(map[int64]string)
-			rng := rand.New(rand.NewSource(seed))
 			check := func(step int) {
 				t.Helper()
 				report, err := db.Check()
@@ -67,24 +75,24 @@ func TestIndexedWorkloadAcrossPageReuseAndReopen(t *testing.T) {
 					}
 				}
 			}
-			for step := 0; step < 300; step++ {
-				id := int64(rng.Intn(50))
-				body := fmt.Sprintf("v%03d-%s", step, strings.Repeat("q", rng.Intn(140)))
+			for step, op := range history.Operations {
+				executed.Operations = append(executed.Operations, op)
+				id, body := op.ID, op.Body
 				record := NewRecord(map[string]Value{"id": Int64Value(id), "body": BytesValue([]byte(body))})
-				switch rng.Intn(3) {
-				case 0:
+				switch op.Kind {
+				case "upsert":
 					if err := db.Upsert("t", record); err != nil {
 						t.Fatal(err)
 					}
 					oracle[id] = body
-				case 1:
+				case "delete":
 					_, exists := oracle[id]
 					removed, err := db.Delete("t", NewRecord(map[string]Value{"id": Int64Value(id)}))
 					if err != nil || removed != exists {
 						t.Fatalf("step=%d delete=%v err=%v", step, removed, err)
 					}
 					delete(oracle, id)
-				case 2:
+				case "insert":
 					_, exists := oracle[id]
 					err := db.Insert("t", record)
 					if exists {
@@ -112,7 +120,7 @@ func TestIndexedWorkloadAcrossPageReuseAndReopen(t *testing.T) {
 					check(step)
 				}
 			}
-			check(300)
+			check(len(history.Operations))
 		})
 	}
 }
