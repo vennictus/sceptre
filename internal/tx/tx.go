@@ -16,15 +16,17 @@ var (
 type committedTx struct {
 	version uint64
 	writes  map[string]struct{}
+	allKeys bool
 }
 
 // Manager coordinates snapshot transactions and serialized commits.
 type Manager struct {
-	store   *kv.KV
-	mu      sync.Mutex
-	version uint64
-	active  map[*Tx]uint64
-	history []committedTx
+	store      *kv.KV
+	mu         sync.Mutex
+	version    uint64
+	active     map[*Tx]uint64
+	history    []committedTx
+	generation uint64
 }
 
 type pendingMutation struct {
@@ -47,8 +49,9 @@ type Tx struct {
 // NewManager creates a transaction manager for a KV store.
 func NewManager(store *kv.KV) *Manager {
 	return &Manager{
-		store:  store,
-		active: make(map[*Tx]uint64),
+		store:      store,
+		active:     make(map[*Tx]uint64),
+		generation: store.Pager().Meta().Generation,
 	}
 }
 
@@ -56,6 +59,7 @@ func NewManager(store *kv.KV) *Manager {
 func (m *Manager) Begin() *Tx {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.observeExternalCommit()
 
 	tx := beginSnapshot(m.store)
 	tx.manager = m
@@ -149,11 +153,11 @@ func (tx *Tx) Commit() error {
 	for _, key := range tx.order {
 		mutations = append(mutations, tx.pending[key].mutation)
 	}
-	if err := tx.store.Apply(mutations); err != nil {
-		return err
+	err := tx.store.Apply(mutations)
+	if err == nil || errors.Is(err, kv.ErrCommitCommitted) || errors.Is(err, kv.ErrRecoveryRequired) {
+		tx.close()
 	}
-	tx.close()
-	return nil
+	return err
 }
 
 // Abort discards all buffered writes.
@@ -181,7 +185,7 @@ func (tx *Tx) ensureOpen() error {
 	if tx == nil || tx.closed || tx.store == nil {
 		return ErrClosed
 	}
-	return nil
+	return tx.store.Err()
 }
 
 func (m *Manager) commit(tx *Tx) error {
@@ -191,9 +195,11 @@ func (m *Manager) commit(tx *Tx) error {
 	if tx.closed {
 		return ErrClosed
 	}
+	m.observeExternalCommit()
 	if m.detectConflict(tx) {
 		delete(m.active, tx)
 		tx.close()
+		m.pruneHistory()
 		return ErrConflict
 	}
 
@@ -201,18 +207,26 @@ func (m *Manager) commit(tx *Tx) error {
 	for _, key := range tx.order {
 		mutations = append(mutations, tx.pending[key].mutation)
 	}
-	if err := m.store.Apply(mutations); err != nil {
+	err := m.store.Apply(mutations)
+	if err != nil && !errors.Is(err, kv.ErrCommitCommitted) {
+		if errors.Is(err, kv.ErrRecoveryRequired) {
+			delete(m.active, tx)
+			tx.close()
+			m.pruneHistory()
+		}
 		return err
 	}
 
 	m.version++
+	m.generation = m.store.Pager().Meta().Generation
 	m.history = append(m.history, committedTx{
 		version: m.version,
 		writes:  cloneKeySet(tx.writes),
 	})
 	delete(m.active, tx)
 	tx.close()
-	return nil
+	m.pruneHistory()
+	return err
 }
 
 func (m *Manager) abort(tx *Tx) {
@@ -221,6 +235,36 @@ func (m *Manager) abort(tx *Tx) {
 
 	delete(m.active, tx)
 	tx.close()
+	m.pruneHistory()
+}
+
+// Serialized writes outside this manager cannot be attributed to specific keys.
+// Conservatively invalidate older transactions instead of losing conflicts.
+func (m *Manager) observeExternalCommit() {
+	generation := m.store.Pager().Meta().Generation
+	if generation == m.generation {
+		return
+	}
+	m.version++
+	m.generation = generation
+	m.history = append(m.history, committedTx{version: m.version, allKeys: true})
+	m.pruneHistory()
+}
+
+func (m *Manager) pruneHistory() {
+	oldest := m.version
+	for _, version := range m.active {
+		if version < oldest {
+			oldest = version
+		}
+	}
+	n := 0
+	for n < len(m.history) && m.history[n].version <= oldest {
+		n++
+	}
+	remaining := copy(m.history, m.history[n:])
+	clear(m.history[remaining:])
+	m.history = m.history[:remaining]
 }
 
 func (m *Manager) detectConflict(tx *Tx) bool {
@@ -229,7 +273,7 @@ func (m *Manager) detectConflict(tx *Tx) bool {
 		if committed.version <= tx.version {
 			break
 		}
-		if setsOverlap(tx.reads, committed.writes) || setsOverlap(tx.writes, committed.writes) {
+		if committed.allKeys || setsOverlap(tx.reads, committed.writes) || setsOverlap(tx.writes, committed.writes) {
 			return true
 		}
 	}
