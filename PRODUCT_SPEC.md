@@ -1,8 +1,10 @@
 # Product Spec
 
-Sceptre is a transparent embedded relational database engine. The product goal
-is not broad SQL compatibility; it is a readable vertical implementation of
-database internals with first-class inspection and recovery tooling.
+Sceptre is an open-source relational database in Go. Its product goal is a
+dependable general-purpose single-node engine with useful inspection and query
+diagnostics. This specification describes the current bounded implementation;
+the detailed [engine contract](docs/ENGINE_CONTRACT.md) defines its guarantees
+and limitations.
 
 ## Goals
 
@@ -20,14 +22,14 @@ B+ tree storage, durability, tables, indexes, transactions, and a SQL-like query
 language. This codebase uses that learning path as foundation and emphasizes
 inspectability, consistency checking, query tracing, and a polished CLI demo.
 
-## Non-Goals
+## Currently Unsupported
 
 - Network server mode.
 - Multi-process write sharing.
 - Full SQL compatibility.
 - Joins, aggregation, sorting, SQL transaction statements, or MVCC isolation
   levels.
-- Competing with SQLite/Postgres on performance or feature breadth.
+- Broad SQL compatibility and comparative performance superiority claims.
 
 ## Engine Stack
 
@@ -35,13 +37,15 @@ inspectability, consistency checking, query tracing, and a polished CLI demo.
 CLI
 SQL parser / planner / executor
 tables / rows / secondary indexes
-internal transaction primitives
 durable key/value apply
 copy-on-write B+ tree
 freelist
 pager / dual meta pages / fsync / file lock
 single database file
 ```
+
+`internal/tx` is a separate KV transaction primitive; table and SQL execution do
+not currently pass through it.
 
 ## File Ownership
 

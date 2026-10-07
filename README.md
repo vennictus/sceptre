@@ -8,7 +8,7 @@
 |____/ \____|_____|_|    |_| |_| \_\_____|
 </pre>
 
-**A transparent embedded relational database engine built in Go**
+**An open-source relational database built in Go**
 
 [![CI](https://github.com/vennictus/sceptre/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vennictus/sceptre/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vennictus/sceptre)](https://goreportcard.com/report/github.com/vennictus/sceptre)
@@ -32,14 +32,15 @@
 
 ## What Is Sceptre?
 
-Sceptre is a compact embedded database engine that implements the stack from
-disk pages up to a small SQL layer. It is designed to make database internals
-visible: you can run a query, see the access path, inspect the B+ tree pages,
-view freelist state, and validate recovery behavior from the CLI.
+Sceptre is an open-source relational database in Go, built around a single-file
+B+tree engine. The current implementation supports a bounded SQL subset through
+the CLI, with typed tables, secondary indexes, atomic statement mutations,
+inspection, and tested recovery boundaries.
 
-It is not a SQLite replacement. It is a focused engine for studying and
-demonstrating storage, indexing, query execution, consistency, and recovery in
-one readable Go codebase.
+Its product direction is a dependable general-purpose database with useful
+query and storage diagnostics. The current supported behavior and limits are
+documented in [the engine contract](docs/ENGINE_CONTRACT.md). Application APIs,
+SQL transactions, and browser integration are not implemented in this version.
 
 ---
 
@@ -222,6 +223,9 @@ The detailed supported boundaries are in [PRODUCT_SPEC.md](PRODUCT_SPEC.md).
 ```text
 sceptre/
 ├── cmd/sceptre          # CLI entry point and terminal formatting
+├── cmd/sceptre-bench    # Durable workload measurement runner
+├── docs                # Engine contracts, validation, measured baselines
+├── internal/bench      # Workloads and measurement accounting
 ├── internal/sql         # Lexer, parser, planner, executor, analyze reports
 ├── internal/table       # Schemas, records, primary keys, secondary indexes, checks
 ├── internal/tx          # Internal transaction primitives and conflict detection
@@ -240,6 +244,9 @@ sceptre/
 |:--|:--|
 | **[GUIDE.md](GUIDE.md)** | Hands-on walkthrough of the CLI, demo, inspection, tracing, and recovery tools |
 | **[PRODUCT_SPEC.md](PRODUCT_SPEC.md)** | Technical design, storage model, transaction scope, file format, and recovery protocol |
+| **[Engine contract](docs/ENGINE_CONTRACT.md)** | Supported guarantees, concurrency and compatibility limits, and implementation map |
+| **[Validation](docs/VALIDATION.md)** | Regression, race, coverage, fuzz, and saved-workload replay commands |
+| **[Benchmarks](docs/BENCHMARKS.md)** | Reproducible durable workload methodology and measured baseline |
 | **[PERFORMANCE.md](PERFORMANCE.md)** | Demo results, benchmarks, and performance tradeoffs |
 
 ---

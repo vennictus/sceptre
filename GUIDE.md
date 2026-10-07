@@ -3,6 +3,10 @@
 This guide walks through Sceptre from the CLI down to the storage inspection
 tools. It assumes Go 1.22+ and a terminal in the repository root.
 
+Use the [engine contract](docs/ENGINE_CONTRACT.md) for supported semantics,
+[validation guide](docs/VALIDATION.md) for tests and failure replay, and
+[benchmark guide](docs/BENCHMARKS.md) for reproducible workload measurements.
+
 ## 1. Run The Guided Demo
 
 ```bash
