@@ -1,5 +1,12 @@
 # Performance
 
+The [Go application API](docs/API.md) adds serialized multi-statement transaction
+staging. Its scans build a private view including pending writes, and statement
+validation copies that view before staging changes. The published workload
+baseline measures direct internal table/SQL execution, not this public API's
+additional copying and ownership waits. It establishes no API throughput or
+concurrent-request performance claim.
+
 Sceptre's performance is described through reproducible workloads with durability
 and hardware stated. See [the durable baseline](docs/BENCHMARKS.md) for current
 dataset-growth, batch, mixed-workload, memory, and physical-write measurements.

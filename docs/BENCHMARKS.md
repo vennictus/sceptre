@@ -5,6 +5,9 @@ verifies integrity and row counts, reopens each database, and verifies again.
 Output is JSON on stdout; progress goes to stderr. It never opens an existing
 user database. Its own temporary directories are removed after the run.
 
+These workloads use direct internal table/SQL execution. They do not measure the
+public Go API's transaction-view copying, ownership waits, or concurrent callers.
+
 ```bash
 mkdir -p benchmark-results
 go run ./cmd/sceptre-bench \

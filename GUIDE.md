@@ -6,6 +6,8 @@ tools. It assumes Go 1.22+ and a terminal in the repository root.
 Use the [engine contract](docs/ENGINE_CONTRACT.md) for supported semantics,
 [validation guide](docs/VALIDATION.md) for tests and failure replay, and
 [benchmark guide](docs/BENCHMARKS.md) for reproducible workload measurements.
+Use the [Go API guide](docs/API.md) for application integration, typed parameters,
+and multi-statement transactions.
 
 ## 1. Run The Guided Demo
 
@@ -56,8 +58,9 @@ error. Use non-negative LIMIT/OFFSET values; LIMIT 0 returns an empty result.
 An UPDATE or DELETE applies all matching rows and index changes in one KV commit.
 Invalid or oversized rows do not leave earlier rows partially updated. A commit
 error can still occur after the complete statement has been published; do not
-assume every error means rollback. SQL transactions spanning several statements
-and concurrent engine access remain unsupported.
+assume every error means rollback. CLI SQL statements commit independently. The
+public Go API supports multi-statement transactions and coordinates concurrent
+requests; raw internal engine access still requires serialization.
 
 The OS releases database ownership when a process exits, so restart does not
 require removing a stale lock file. If an operation reports `ErrRecoveryRequired`,

@@ -1,7 +1,8 @@
 # Supported engine contract
 
 Sceptre is an open-source relational database in Go. The current implementation
-provides a single-file engine and CLI with a bounded SQL subset. This document
+provides a single-file engine, public Go API, and CLI with a bounded SQL subset.
+This document
 describes implemented behavior and its limits; it is not a release-readiness claim.
 
 ## Execution and ownership
@@ -11,11 +12,11 @@ automatically when the handle closes or the process exits. Use a local filesyste
 with working locks. Unix locks are advisory. Replacing or renaming an open file,
 network filesystems, and mixed older/newer binaries sharing a file are unsupported.
 
-Within the owner, callers must serialize engine operations, including reads,
-writes, transaction operations, iterator creation, and close. An internal
-transaction manager serializes its commits, but it does not make the raw KV,
-table, or SQL layers safe for concurrent requests. There is no public application
-API, server, connection pool, or browser integration in this version.
+Within the owner, the [public Go API](API.md) serializes transactions and coordinates
+all its reads, writes, and close operations. Public callers may use it concurrently.
+Raw internal KV, table, and SQL operations still require caller serialization;
+the internal transaction manager only serializes its commits. There is no server,
+connection pool, or browser integration in this version.
 
 ## Atomicity and commit outcomes
 
@@ -28,6 +29,7 @@ API, server, connection pool, or browser integration in this version.
 | `CreateIndex` | Catalog change, prefix allocation, and complete backfill |
 | SQL INSERT, UPDATE, DELETE | Entire statement and associated indexes |
 | Internal KV transaction commit | Buffered KV mutations |
+| Public Go transaction commit | All buffered schema, row, and index changes across statements |
 
 Catalog and index changes are assembled before the same KV publication as rows.
 Validation, encoding, allocation, and supported data-write/data-sync failures
@@ -43,8 +45,9 @@ matching no rows does not publish a KV generation.
 | `kv.ErrCommitCommitted` | The post-publication test hook reported an error after the complete batch committed; do not replay it as an aborted operation. |
 | `kv.ErrRecoveryRequired` | A metadata write or sync had an uncertain result; close and reopen before new operations, then reconcile application state before retrying. |
 
-Check wrapped categories with `errors.Is`. A SQL mutation returning an error has
-zero RowsAffected in its returned Result; this is not evidence of rollback.
+Check wrapped categories with `errors.Is`. Internal SQL mutations returning an
+error have zero RowsAffected; public automatic execution can return a statement
+Result alongside a commit error. Neither result is evidence of rollback.
 Metadata uncertainty blocks new KV reads, writes, and iterators, and internal
 transaction operations. Existing immutable iterators still hold the older
 committed view. Low-level pager/tree access is an internal inspection/testing
@@ -57,22 +60,31 @@ through power loss is not an established guarantee.
 
 ## Transactions and snapshots
 
-SQL does not expose BEGIN, COMMIT, or ROLLBACK. Separate SQL statements commit
-independently. Table/SQL operations are not integrated with the internal KV
-transaction primitives.
+SQL text does not expose BEGIN, COMMIT, or ROLLBACK. The public Go API exposes
+Begin, Execute, Commit, and Rollback. Table/SQL execution within a public transaction
+uses transaction-aware KV reads, scans, and atomic statement staging. Schema and
+index backfill participate alongside rows. Pending changes are visible to that
+transaction. The API serializes whole transactions, including read-only work,
+so concurrent public requests execute in a serial order. Failed statements leave
+prior successful work intact and the transaction usable. Public Commit ends it
+on every outcome; Close aborts open work. See [API.md](API.md) for lifecycle,
+cancellation, and outcome handling. CLI statements still commit independently.
 
 `tx.Begin` reads a copied tree and buffers writes, without managed conflict
 detection. `tx.Manager` adds conflict checks for point reads and writes against
-later committed write sets. A conflict closes the transaction. A definite
-pre-publication storage failure leaves it open for explicit retry or abort.
+later committed write sets. Scans conservatively track the whole keyspace and
+conflict with any later writing commit, including phantom inserts. A conflict
+closes the transaction. A definite pre-publication storage failure leaves it open
+for explicit retry or abort.
 Success and a known committed error close it. An uncertain publication closes
 the attempted writer and blocks operations on the underlying handle until reopen.
 
 Serialized writes outside a manager conservatively invalidate its older snapshots
 when it observes a changed pager generation. Conflict history is retained only
 while active snapshots need it. Long-lived snapshots can retain history and full
-tree copies. Range/predicate conflict tracking, SQL transaction isolation, and
-cross-layer transaction guarantees are not implemented.
+tree copies. Precise predicate/range conflict tracking and concurrent SQL
+transactions are not implemented. The public API uses exclusive execution
+ownership rather than this optimistic manager.
 
 KV iterators retain their creation-time committed tree across successful and
 failed subsequent writes. Their returned key/value bytes are copied. Table
@@ -83,9 +95,9 @@ scanners likewise use that iterator; access still must be serialized.
 | Supported | Limits |
 | --- | --- |
 | CREATE TABLE, CREATE INDEX | No ALTER/DROP, migrations, unique secondary indexes, foreign keys, or checks |
-| INSERT | One literal row; all declared fields required; duplicate primary key rejected |
+| INSERT | One literal or parameter-bound row; all declared fields required; duplicate primary key rejected |
 | SELECT | Projection, WHERE comparisons, AND/OR and parentheses, nonnegative LIMIT/OFFSET |
-| UPDATE | Literal assignments to non-key columns |
+| UPDATE | Literal or parameter assignments to non-key columns |
 | DELETE | Filtered or all-row deletion |
 | Access paths | Full scan, complete primary-key lookup, single-column primary-key range, complete secondary-index equality lookup |
 | Diagnostics | EXPLAIN, measured SELECT analysis, tracing, schema/page/index inspection, integrity checking |
@@ -95,14 +107,18 @@ Byte comparisons use byte order, with no locale collation or implicit numeric
 conversion. SQL string literals use single quotes and doubled embedded quotes.
 Keywords are case insensitive; stored identifiers are matched by their spelling.
 There are no NULL values, floating-point/boolean columns, arithmetic expressions,
-typed parameters, joins, aggregates, or explicit ORDER BY.
+joins, aggregates, or explicit ORDER BY. The public API supports positional typed
+`?` bindings in literal positions, with exact binding counts and no SQL text
+interpolation. CLI parameter input is not implemented.
 
 Columns, predicate types, assignments, projections, and pagination bounds are
 checked even for empty tables or no-match access paths. LIMIT 0 is valid. Natural
 table access follows primary-key order; secondary access follows index-key order.
 An explicit stable SQL ordering contract is not implemented.
 
-LIMIT bounds returned rows, not work or memory: SQL collects candidates before
+The public API caps returned SELECT rows (default 1000), SQL text (65536 bytes),
+and binding count (256). Raw internal SQL and the CLI require explicit LIMIT for
+bounded output. LIMIT bounds returned rows, not work or memory: SQL collects candidates before
 filtering and projection. Row bodies and index keys must fit their encoded cells
 in a page; the effective limit depends on keys, escaping, metadata, and tree
 structure. Default pages are 4096 bytes. There are no overflow values or silent
@@ -139,11 +155,13 @@ operational guarantees in this version.
 
 | Path | Implemented responsibility |
 | --- | --- |
+| `sceptre.go`, `errors.go` | Serialized public execution, transaction lifecycle, result bounds, stable error categories |
 | `cmd/sceptre/main.go` | CLI dispatch, shell, rendering, demo and diagnostics |
 | `internal/sql/parser.go`, `lexer.go`, `validate.go` | Syntax and schema/type binding |
 | `internal/sql/plan.go`, `executor.go`, `analyze.go` | Access selection, materialized execution, diagnostics |
 | `internal/table/table.go`, `scan.go`, `encoding.go` | Catalog, row/index batches, byte/int encoding and scans |
-| `internal/tx/tx.go` | Copied KV snapshots, pending mutations, point conflicts and lifecycle |
+| `internal/tx/tx.go`, `store.go` | Copied KV snapshots, atomic statement staging, pending scans, conservative conflicts and lifecycle |
+| `internal/sql/parameters.go` | Typed parameter token binding |
 | `internal/kv/kv.go`, `iter.go` | Private working tree, allocation/remap, atomic publication, rollback and outcome handling |
 | `internal/btree/tree.go`, `snapshot.go`, `validate.go` | Slotted B+tree pages, splits/merges, deep snapshots and graph validation |
 | `internal/freelist/freelist.go` | Free-page chains and page allocation |
@@ -162,7 +180,11 @@ atomicity, short writes, sync errors, post-publication outcomes, unsafe freelist
 routing corruption, metadata fallback after reuse, immutable iterators, live
 ownership exclusion, abrupt subprocess exit/reopen, and continued writes after
 recovery. Seeded indexed workloads compare scans, point and index reads with a
-map oracle and repeatedly reopen the database.
+map oracle and repeatedly reopen the database. Public API regressions verify
+multi-statement catalog/row/index commit and rollback, read-your-writes, failed
+statements, serialized request ownership, context waiting, close, and physical
+commit errors. Seeded transaction workloads compare pending and committed index
+results with a map model through rollback and reopen.
 
 Storage and parser fuzz tests are bounded smoke experiments. CI collects coverage
 and failure histories; coverage percentages are diagnostic, not correctness

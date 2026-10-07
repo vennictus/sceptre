@@ -34,13 +34,15 @@
 
 Sceptre is an open-source relational database in Go, built around a single-file
 B+tree engine. The current implementation supports a bounded SQL subset through
-the CLI, with typed tables, secondary indexes, atomic statement mutations,
+the CLI and a public Go API, with typed tables, secondary indexes, atomic
+statement mutations,
 inspection, and tested recovery boundaries.
 
 Its product direction is a dependable general-purpose database with useful
 query and storage diagnostics. The current supported behavior and limits are
-documented in [the engine contract](docs/ENGINE_CONTRACT.md). Application APIs,
-SQL transactions, and browser integration are not implemented in this version.
+documented in [the engine contract](docs/ENGINE_CONTRACT.md). The
+[Go API](docs/API.md) supports typed parameters and serialized multi-statement
+transactions. Network serving and browser integration are not implemented.
 
 ---
 
@@ -192,7 +194,7 @@ DELETE FROM users WHERE id = 1;
 
 Supported planner paths include table scans, primary-key lookups,
 primary-key ranges, and exact secondary-index lookups. Joins, aggregations,
-ordering, SQL transactions, and broad SQL compatibility are outside the current
+ordering, SQL transaction syntax, and broad SQL compatibility are outside the current
 scope.
 
 SQL validates column references, predicate types, and update assignments before
@@ -204,9 +206,10 @@ still collected in memory before filtering.
 
 Each SQL UPDATE or DELETE stages its matching row and index changes into one KV
 commit. Validation and oversized-record failures preserve the previous statement
-state. This does not provide multi-statement transactions or concurrent request
-safety: callers must serialize engine access. A commit error after metadata
-publication can still mean the complete statement was committed.
+state. The public Go API coordinates concurrent callers and buffers multiple
+statements, including schema and index changes, until Commit. Raw internal engine
+access still requires serialization. A commit error after metadata publication
+can still mean the complete transaction was committed.
 
 Open rejects unsafe freelists and invalid B+tree routing graphs. Allocation
 protects both valid metadata generations during page reuse, and existing KV
@@ -222,6 +225,7 @@ The detailed supported boundaries are in [PRODUCT_SPEC.md](PRODUCT_SPEC.md).
 
 ```text
 sceptre/
+├── sceptre.go           # Public Go API and serialized SQL transactions
 ├── cmd/sceptre          # CLI entry point and terminal formatting
 ├── cmd/sceptre-bench    # Durable workload measurement runner
 ├── docs                # Engine contracts, validation, measured baselines
@@ -245,6 +249,7 @@ sceptre/
 | **[GUIDE.md](GUIDE.md)** | Hands-on walkthrough of the CLI, demo, inspection, tracing, and recovery tools |
 | **[PRODUCT_SPEC.md](PRODUCT_SPEC.md)** | Technical design, storage model, transaction scope, file format, and recovery protocol |
 | **[Engine contract](docs/ENGINE_CONTRACT.md)** | Supported guarantees, concurrency and compatibility limits, and implementation map |
+| **[Go API](docs/API.md)** | Typed SQL parameters, multi-statement transactions, lifecycle, bounds, and stable errors |
 | **[Validation](docs/VALIDATION.md)** | Regression, race, coverage, fuzz, and saved-workload replay commands |
 | **[Benchmarks](docs/BENCHMARKS.md)** | Reproducible durable workload methodology and measured baseline |
 | **[PERFORMANCE.md](PERFORMANCE.md)** | Demo results, benchmarks, and performance tradeoffs |

@@ -34,9 +34,10 @@ inspectability, consistency checking, query tracing, and a polished CLI demo.
 ## Engine Stack
 
 ```text
-CLI
+CLI / public Go API
 SQL parser / planner / executor
 tables / rows / secondary indexes
+transaction-aware reads / scans / statement staging (Go API)
 durable key/value apply
 copy-on-write B+ tree
 freelist
@@ -44,8 +45,9 @@ pager / dual meta pages / fsync / file lock
 single database file
 ```
 
-`internal/tx` is a separate KV transaction primitive; table and SQL execution do
-not currently pass through it.
+The public Go API owns a serialized execution lease and passes table/SQL execution
+through `internal/tx`. CLI operations continue to use direct statement commits.
+The [application API guide](docs/API.md) defines the public lifecycle and errors.
 
 ## File Ownership
 
@@ -170,8 +172,9 @@ SQL UPDATE and DELETE stage all matching row/index changes and apply them throug
 one KV batch. Table UpdateMany rejects repeated primary keys and stages all rows
 before applying its batch; missing rows or invalid records do not publish a
 commit. Zero-match mutations do not advance the metadata generation. These are
-statement boundaries, not SQL BEGIN/COMMIT/ROLLBACK support. Callers must serialize
-access to the table/SQL engine; concurrent application requests are not yet safe.
+statement boundaries; SQL text does not support BEGIN/COMMIT/ROLLBACK. The public
+Go API groups statements into transactions and coordinates concurrent callers.
+Raw table/SQL access requires caller serialization.
 
 An error is not proof of rollback. The commit outcomes above also apply to SQL
 statements. Tests exercise short writes, data and metadata sync failures, and
@@ -189,8 +192,17 @@ power-loss behavior.
 - serialized commit application
 - optimistic conflict detection
 
-These primitives are internal. Sceptre does not currently expose SQL
-`BEGIN`/`COMMIT`/`ROLLBACK`.
+The public Go API exposes Begin/Commit/Rollback and integrates schema, row, and
+index operations with these primitives. One transaction owns execution at a time,
+including reads, so public requests execute in serial order. Failed statements
+preserve prior pending work; Commit ends the transaction on every outcome. Close
+aborts open work. SQL transaction statements remain unsupported.
+
+Typed positional `?` parameters bind int64 or arbitrary bytes as literal tokens.
+The API caps SELECT results to MaxRows (default 1000), SQL text to 65536 bytes,
+and binding count to 256. These are request/output bounds, not engine memory or
+execution-work limits. Contexts stop ownership waits and are checked before work;
+in-flight execution cannot yet be canceled.
 
 Managed transactions record conflict history and close a writer even when a
 post-publication hook reports an already committed outcome. An uncertain
@@ -198,7 +210,10 @@ publication blocks transaction operations until reopen. Serialized writes made
 outside a manager conservatively conflict with its older snapshots when the
 manager observes the new pager generation. History is pruned when no active
 snapshot needs it; long-lived snapshots can still retain history and tree copies.
-Raw KV access and multiple managers must be serialized by the caller.
+Scans conservatively conflict with every later writing commit, including phantom
+inserts; precise predicate conflict tracking is unsupported. Raw KV access and
+multiple managers must be serialized by the caller. Public serialized transactions
+do not use optimistic conflict detection.
 
 ## Consistency Checking
 
