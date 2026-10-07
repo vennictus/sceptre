@@ -121,6 +121,30 @@ Planner access paths:
 and reports measured row counters and stage timings. `trace` prints compact row
 flow through the execution stages.
 
+Before selecting an access path, predicates are validated for known columns,
+compatible value types, and boolean WHERE/logical expressions. UPDATE targets
+and assignment types are validated before scanning. EXPLAIN and ANALYZE use the
+same semantic checks as execution, so an empty table or a no-match access path
+does not hide an invalid statement.
+
+Primary-key columns cannot be assigned by SQL UPDATE, including assignments to
+their existing value; atomic key relocation is not implemented. Duplicate INSERT
+columns and UPDATE targets are rejected. Explicit LIMIT/OFFSET values must be
+non-negative. LIMIT 0 is valid. Pagination bounds returned rows but does not yet
+bound candidate materialization or execution memory.
+
+SQL UPDATE and DELETE stage all matching row/index changes and apply them through
+one KV batch. Table UpdateMany rejects repeated primary keys and stages all rows
+before applying its batch; missing rows or invalid records do not publish a
+commit. Zero-match mutations do not advance the metadata generation. These are
+statement boundaries, not SQL BEGIN/COMMIT/ROLLBACK support. Callers must serialize
+access to the table/SQL engine; concurrent application requests are not yet safe.
+
+An error is not proof of rollback: the meta-published interruption hook runs after
+the complete batch has committed. Earlier supported interruption stages preserve
+the previous statement state. Arbitrary I/O-error outcomes still require a
+broader recovery contract and fault testing.
+
 ## Transactions
 
 `internal/tx` provides local transaction primitives:

@@ -54,16 +54,25 @@ func Explain(db *table.DB, input string) (Plan, error) {
 func ExplainStatement(db *table.DB, stmt Statement) (Plan, error) {
 	switch stmt := stmt.(type) {
 	case *SelectStmt:
-		plan, _, err := planQuery(db, "select", stmt.Table, stmt.Where)
+		plan, def, err := planQuery(db, "select", stmt.Table, stmt.Where)
 		if err != nil {
+			return Plan{}, err
+		}
+		if _, err := validateSelect(def, stmt); err != nil {
 			return Plan{}, err
 		}
 		plan.Limit = stmt.Limit
 		plan.Offset = stmt.Offset
 		return plan, nil
 	case *UpdateStmt:
-		plan, _, err := planQuery(db, "update", stmt.Table, stmt.Where)
-		return plan, err
+		plan, def, err := planQuery(db, "update", stmt.Table, stmt.Where)
+		if err != nil {
+			return Plan{}, err
+		}
+		if _, err := validateAssignments(def, stmt.Assignments); err != nil {
+			return Plan{}, err
+		}
+		return plan, nil
 	case *DeleteStmt:
 		plan, _, err := planQuery(db, "delete", stmt.Table, stmt.Where)
 		return plan, err
@@ -79,6 +88,9 @@ func planQuery(db *table.DB, statement, tableName string, where Expr) (Plan, tab
 	}
 	if !ok {
 		return Plan{}, table.TableDef{}, table.ErrTableNotFound
+	}
+	if err := validateWhere(def, where); err != nil {
+		return Plan{}, table.TableDef{}, err
 	}
 
 	terms := analyzeTerms(where)

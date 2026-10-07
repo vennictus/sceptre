@@ -354,6 +354,36 @@ func (db *DB) Update(tableName string, record Record) error {
 	return db.writeRow(tableName, record, writeUpdateOnly)
 }
 
+// UpdateMany overwrites existing rows and their indexes in one durable commit.
+// Records must have distinct primary keys; no changes are applied if staging fails.
+func (db *DB) UpdateMany(tableName string, records []Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(records))
+	mutations := make([]kv.Mutation, 0, len(records)*(1+2*len(def.Indexes)))
+	for _, record := range records {
+		changes, err := db.rowMutations(def, record, writeUpdateOnly)
+		if err != nil {
+			return err
+		}
+		key, err := encodeRowKey(def, primaryKeyRecord(def, record))
+		if err != nil {
+			return err
+		}
+		if _, exists := seen[string(key)]; exists {
+			return fmt.Errorf("%w: duplicate update primary key", ErrInvalidRecord)
+		}
+		seen[string(key)] = struct{}{}
+		mutations = append(mutations, changes...)
+	}
+	return db.kv.Apply(mutations)
+}
+
 // Upsert writes a row regardless of whether it already exists.
 func (db *DB) Upsert(tableName string, record Record) error {
 	return db.writeRow(tableName, record, writeUpsert)
@@ -478,56 +508,64 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	if err != nil {
 		return err
 	}
-	if err := validateFullRecord(def, record); err != nil {
+	mutations, err := db.rowMutations(def, record, mode)
+	if err != nil {
 		return err
+	}
+	return db.kv.Apply(mutations)
+}
+
+func (db *DB) rowMutations(def TableDef, record Record, mode writeMode) ([]kv.Mutation, error) {
+	if err := validateFullRecord(def, record); err != nil {
+		return nil, err
 	}
 
 	keyRecord := primaryKeyRecord(def, record)
 	rowKey, err := encodeRowKey(def, keyRecord)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	_, exists, err := db.kv.Get(rowKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var old Record
 	if exists {
 		var ok bool
-		old, ok, err = db.Get(tableName, keyRecord)
+		old, ok, err = db.Get(def.Name, keyRecord)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !ok {
-			return ErrRowNotFound
+			return nil, ErrRowNotFound
 		}
 	}
 	switch {
 	case mode == writeInsertOnly && exists:
-		return ErrRowExists
+		return nil, ErrRowExists
 	case mode == writeUpdateOnly && !exists:
-		return ErrRowNotFound
+		return nil, ErrRowNotFound
 	}
 
 	rowValue, err := encodeRowValue(def, record)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mutations := make([]kv.Mutation, 0, 1+len(def.Indexes)*2)
 	if exists {
 		deletes, err := deleteIndexMutations(def, old)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		mutations = append(mutations, deletes...)
 	}
 	mutations = append(mutations, kv.Put(rowKey, rowValue))
 	puts, err := putIndexMutations(def, record)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mutations = append(mutations, puts...)
-	return db.kv.Apply(mutations)
+	return mutations, nil
 }
 
 func (db *DB) mustTable(name string) (TableDef, error) {

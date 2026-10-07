@@ -194,6 +194,19 @@ primary-key ranges, and exact secondary-index lookups. Joins, aggregations,
 ordering, SQL transactions, and broad SQL compatibility are outside the current
 scope.
 
+SQL validates column references, predicate types, and update assignments before
+scanning, including queries that match no rows. Primary-key assignments in
+`UPDATE` are rejected; key relocation is not supported. Duplicate INSERT columns
+and UPDATE targets are rejected. `LIMIT` and `OFFSET` must be non-negative;
+`LIMIT 0` returns no rows. Limits bound returned rows, while candidate rows are
+still collected in memory before filtering.
+
+Each SQL UPDATE or DELETE stages its matching row and index changes into one KV
+commit. Validation and oversized-record failures preserve the previous statement
+state. This does not provide multi-statement transactions or concurrent request
+safety: callers must serialize engine access. A commit error after metadata
+publication can still mean the complete statement was committed.
+
 ---
 
 ## Project Structure

@@ -43,6 +43,18 @@ id  name   age
 2   Grace  40
 ```
 
+SQL errors are checked even when a query would return no rows. For example,
+`select * from users where missing = 1` rejects an unknown column. UPDATE can
+change non-key columns; assigning a primary-key column is currently unsupported
+and returns an error. Repeated INSERT columns or UPDATE targets also return an
+error. Use non-negative LIMIT/OFFSET values; LIMIT 0 returns an empty result.
+
+An UPDATE or DELETE applies all matching rows and index changes in one KV commit.
+Invalid or oversized rows do not leave earlier rows partially updated. A commit
+error can still occur after the complete statement has been published; do not
+assume every error means rollback. SQL transactions spanning several statements
+and concurrent engine access remain unsupported.
+
 ## 3. Add And Use An Index
 
 ```bash
