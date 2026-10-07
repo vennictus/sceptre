@@ -72,6 +72,8 @@ jobs:
         run: go test ./internal/btree -run='^$' -fuzz=FuzzValidateTreeNeverPanics -fuzztime=10s -parallel=2
       - name: Bounded SQL parser fuzz
         run: go test ./internal/sql -run='^$' -fuzz=FuzzParse -fuzztime=10s -parallel=2
+      - name: Bounded typed parameter fuzz
+        run: go test ./internal/sql -run='^$' -fuzz=FuzzParameterBytes -fuzztime=10s -parallel=2
       - name: Preserve race and failure evidence
         if: always()
         uses: actions/upload-artifact@v4

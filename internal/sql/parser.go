@@ -20,6 +20,10 @@ func Parse(input string) (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseTokens(tokens)
+}
+
+func parseTokens(tokens []token) (Statement, error) {
 	p := &parser{tokens: tokens}
 	stmt, err := p.parseStatement()
 	if err != nil {
