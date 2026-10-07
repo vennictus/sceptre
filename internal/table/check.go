@@ -41,6 +41,9 @@ func (db *DB) Check() (CheckReport, error) {
 	if db == nil || db.kv == nil {
 		return CheckReport{}, ErrTableNotFound
 	}
+	if err := btree.ValidateSnapshot(db.kv.Tree().Snapshot()); err != nil {
+		return CheckReport{Issues: []CheckIssue{{Code: "btree_graph_invalid", Detail: err.Error()}}}, nil
+	}
 
 	defs, err := db.tables()
 	if err != nil {
@@ -225,6 +228,9 @@ func (db *DB) checkRawKeys(defs []TableDef, prefixes prefixSet, expectedIndexKey
 func (db *DB) checkStoragePages(report *CheckReport) error {
 	p := db.kv.Pager()
 	meta := p.Meta()
+	if _, err := btree.ValidateTree(meta.RootPage, p.ReadPage); err != nil {
+		report.add("btree_graph_invalid", err.Error())
+	}
 	snapshot := db.kv.Tree().Snapshot()
 	reachable := make(map[uint64]struct{}, len(snapshot.Pages))
 	for pageID := range snapshot.Pages {

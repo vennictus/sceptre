@@ -421,8 +421,9 @@ func TestKVReusesFreedPagesAcrossCommits(t *testing.T) {
 		counts = append(counts, store.Pager().Meta().PageCount)
 	}
 
-	if counts[len(counts)-1] > 6 {
-		t.Fatalf("final page count = %d, want <= 6 (counts=%v)", counts[len(counts)-1], counts)
+	// Both metadata generations retain their tree and freelist pages.
+	if counts[len(counts)-1] > 8 {
+		t.Fatalf("final page count = %d, want <= 8 (counts=%v)", counts[len(counts)-1], counts)
 	}
 	if counts[3] != counts[4] || counts[4] != counts[5] {
 		t.Fatalf("page count did not stabilize after reuse: %v", counts)

@@ -41,6 +41,7 @@ type deleteResult struct {
 	empty     bool
 	maxKey    []byte
 	underflow bool
+	split     *splitResult
 }
 
 // NewTree creates an empty in-memory tree with a fixed page size.
@@ -121,6 +122,20 @@ func (t *Tree) Delete(key []byte) (bool, error) {
 	if result.empty {
 		delete(t.pages, t.root)
 		t.root = 0
+		return true, nil
+	}
+	if result.split != nil {
+		rootID, root, err := t.allocateNode(NodeTypeInternal)
+		if err != nil {
+			return false, err
+		}
+		if err := root.AppendInternalCell(t.root, result.maxKey); err != nil {
+			return false, err
+		}
+		if err := root.AppendInternalCell(result.split.PageID, result.split.MaxKey); err != nil {
+			return false, err
+		}
+		t.root = rootID
 		return true, nil
 	}
 
@@ -257,7 +272,10 @@ func (t *Tree) deleteFromInternal(pageID uint64, node Node, key []byte, isRoot b
 		entries = removeInternalEntry(entries, childIndex)
 	} else {
 		entries[childIndex].Key = cloneBytes(childResult.maxKey)
-		if childResult.underflow && len(entries) > 1 {
+		if childResult.split != nil {
+			entries = insertInternalEntry(entries, childIndex+1, internalEntry{Child: childResult.split.PageID, Key: cloneBytes(childResult.split.MaxKey)})
+		}
+		if childResult.split == nil && childResult.underflow && len(entries) > 1 {
 			entries, err = t.fixChildUnderflow(entries, childIndex)
 			if err != nil {
 				return deleteResult{}, err
@@ -272,8 +290,14 @@ func (t *Tree) deleteFromInternal(pageID uint64, node Node, key []byte, isRoot b
 		return deleteResult{removed: true, empty: true}, nil
 	}
 
-	if _, err := buildInternalNode(t.pages[pageID], entries); err != nil {
+	// Removing a short maximum can expose a longer predecessor. Rebalancing
+	// can also enlarge separators, so deletion must propagate internal splits.
+	maximum, split, err := t.writeInternalEntries(pageID, entries)
+	if err != nil {
 		return deleteResult{}, err
+	}
+	if split != nil {
+		return deleteResult{removed: true, maxKey: maximum, split: split}, nil
 	}
 	return internalDeleteResult(entries, true, isRoot, t.minNodeBytes()), nil
 }
@@ -470,7 +494,10 @@ func (t *Tree) insertIntoInternal(pageID uint64, node Node, key, value []byte) (
 			Key:   cloneBytes(rightSplit.MaxKey),
 		})
 	}
+	return t.writeInternalEntries(pageID, entries)
+}
 
+func (t *Tree) writeInternalEntries(pageID uint64, entries []internalEntry) ([]byte, *splitResult, error) {
 	if internalEntriesSize(entries) <= t.pageSize {
 		if _, err := buildInternalNode(t.pages[pageID], entries); err != nil {
 			return nil, nil, err

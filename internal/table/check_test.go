@@ -2,9 +2,44 @@ package table
 
 import (
 	"encoding/binary"
+	"fmt"
 	"path/filepath"
 	"testing"
+
+	"github.com/vennictus/sceptre/internal/btree"
 )
+
+func TestCheckReportsInvalidDurableRouting(t *testing.T) {
+	t.Parallel()
+	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "db"))
+	defer db.Close()
+	mustCreateUsers(t, db)
+	for i := 1; i <= 100; i++ {
+		mustInsertUser(t, db, int64(i), fmt.Sprintf("user-%d", i), 31)
+	}
+	p := db.kv.Pager()
+	page, err := p.ReadPage(p.Meta().RootPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := btree.WrapNode(page)
+	if err != nil || n.Type() != btree.NodeTypeInternal {
+		t.Fatalf("fixture root: %v", err)
+	}
+	offset := int(binary.LittleEndian.Uint16(page[8:]))
+	keyLen := int(binary.LittleEndian.Uint16(page[offset+8:]))
+	page[offset+10+keyLen-1] ^= 1
+	if err := p.WritePage(p.Meta().RootPage, page); err != nil {
+		t.Fatal(err)
+	}
+	report, err := db.Check()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK() || !hasIssue(report, "btree_graph_invalid") {
+		t.Fatalf("invalid routing passed check: %+v", report)
+	}
+}
 
 func TestCheckReportsHealthyDatabase(t *testing.T) {
 	t.Parallel()

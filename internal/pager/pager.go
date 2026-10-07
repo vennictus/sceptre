@@ -17,46 +17,50 @@ var (
 	ErrInvalidPageBuffer = errors.New("pager: page buffer size mismatch")
 	ErrMetaPageSize      = errors.New("pager: meta page size does not match pager")
 	ErrShortPageRead     = errors.New("pager: short page read")
+	ErrCommitUncertain   = errors.New("pager: metadata publication outcome is uncertain; reopen required")
 )
 
 // Options controls how the pager initializes a database file.
 type Options struct {
 	PageSize uint32
+	IO       *IOHooks
+}
+
+// IOHooks provides an optional physical I/O seam for storage-error tests.
+// Nil functions use real file operations. Hooks must not change during use.
+type IOHooks struct {
+	WriteAt func(*os.File, []byte, int64) (int, error)
+	Sync    func(*os.File) error
 }
 
 // Pager owns the database file and the currently selected meta page.
 type Pager struct {
 	path       string
-	lockPath   string
 	file       *os.File
-	lock       *os.File
 	pageSize   uint32
 	meta       Meta
 	activeSlot int
+	io         *IOHooks
 }
 
 // Open opens an existing pager file or initializes a new one.
 func Open(path string, opts Options) (*Pager, error) {
-	lock, lockPath, err := acquireLock(path)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return nil, err
 	}
-
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
-	if err != nil {
-		releaseLock(lock, lockPath)
+	if err := lockDatabase(file); err != nil {
+		file.Close()
 		return nil, err
 	}
 
 	pager := &Pager{
-		path:     path,
-		lockPath: lockPath,
-		file:     file,
-		lock:     lock,
+		path: path,
+		file: file,
+		io:   opts.IO,
 	}
 	if err := pager.open(opts); err != nil {
 		file.Close()
-		releaseLock(lock, lockPath)
 		return nil, err
 	}
 	return pager, nil
@@ -69,12 +73,7 @@ func (p *Pager) Close() error {
 	}
 	fileErr := p.file.Close()
 	p.file = nil
-	lockErr := releaseLock(p.lock, p.lockPath)
-	p.lock = nil
-	if fileErr != nil {
-		return fileErr
-	}
-	return lockErr
+	return fileErr
 }
 
 // Path returns the filesystem path backing the pager.
@@ -92,6 +91,13 @@ func (p *Pager) Meta() Meta {
 	return p.meta
 }
 
+// PreviousMeta returns the other valid metadata slot, if one exists.
+// Its tree and freelist pages must not be reused before the next publication.
+func (p *Pager) PreviousMeta() (Meta, bool) {
+	meta, err := p.readMetaPage(1-p.activeSlot, p.pageSize)
+	return meta, err == nil
+}
+
 // ActiveMetaSlot returns which reserved meta page is currently active.
 func (p *Pager) ActiveMetaSlot() int {
 	return p.activeSlot
@@ -99,7 +105,27 @@ func (p *Pager) ActiveMetaSlot() int {
 
 // Sync flushes file contents to durable storage.
 func (p *Pager) Sync() error {
+	if p.io != nil && p.io.Sync != nil {
+		return p.io.Sync(p.file)
+	}
 	return p.file.Sync()
+}
+
+func (p *Pager) writeAt(data []byte, offset int64) error {
+	var n int
+	var err error
+	if p.io != nil && p.io.WriteAt != nil {
+		n, err = p.io.WriteAt(p.file, data, offset)
+	} else {
+		n, err = p.file.WriteAt(data, offset)
+	}
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 // ReadPage reads a full non-meta page by page ID.
@@ -134,10 +160,7 @@ func (p *Pager) WritePage(pageID uint64, page []byte) error {
 		return ErrInvalidPageBuffer
 	}
 
-	if _, err := p.file.WriteAt(page, p.pageOffset(pageID)); err != nil {
-		return err
-	}
-	return nil
+	return p.writeAt(page, p.pageOffset(pageID))
 }
 
 // PublishMeta writes the next meta page and makes it active in memory.
@@ -149,10 +172,10 @@ func (p *Pager) PublishMeta(meta Meta) error {
 
 	slot := 1 - p.activeSlot
 	if err := p.writeMetaPage(slot, meta); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
 	}
-	if err := p.file.Sync(); err != nil {
-		return err
+	if err := p.Sync(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
 	}
 
 	p.meta = meta
@@ -196,7 +219,7 @@ func (p *Pager) initialize(pageSize uint32) error {
 	if err := p.writeMetaPage(1, current); err != nil {
 		return err
 	}
-	if err := p.file.Sync(); err != nil {
+	if err := p.Sync(); err != nil {
 		return err
 	}
 
@@ -258,8 +281,7 @@ func (p *Pager) writeMetaPage(slot int, meta Meta) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.file.WriteAt(page, p.metaOffset(slot, meta.PageSize))
-	return err
+	return p.writeAt(page, p.metaOffset(slot, meta.PageSize))
 }
 
 func (p *Pager) readMetaPage(slot int, pageSize uint32) (Meta, error) {
@@ -276,37 +298,6 @@ func (p *Pager) metaOffset(slot int, pageSize uint32) int64 {
 
 func (p *Pager) pageOffset(pageID uint64) int64 {
 	return int64(pageID) * int64(p.pageSize)
-}
-
-func acquireLock(path string) (*os.File, string, error) {
-	lockPath := path + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, lockPath, fmt.Errorf("%w: %s", ErrDatabaseLocked, lockPath)
-		}
-		return nil, lockPath, err
-	}
-	if _, err := fmt.Fprintf(lock, "pid=%d\n", os.Getpid()); err != nil {
-		releaseLock(lock, lockPath)
-		return nil, lockPath, err
-	}
-	return lock, lockPath, nil
-}
-
-func releaseLock(lock *os.File, lockPath string) error {
-	var closeErr error
-	if lock != nil {
-		closeErr = lock.Close()
-	}
-	removeErr := os.Remove(lockPath)
-	if errors.Is(removeErr, os.ErrNotExist) {
-		removeErr = nil
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return removeErr
 }
 
 func readPageSize(header []byte) uint32 {
