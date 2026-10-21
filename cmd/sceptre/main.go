@@ -24,6 +24,7 @@ Usage:
   sceptre demo [db-path] [--rows <n>] [--force]
   sceptre sql <db-path> "<statement>"
   sceptre shell <db-path>
+  sceptre serve <db-path> [--addr 127.0.0.1:7463] [--max-rows 1000] [--transaction-ttl 1m]
   sceptre explain <db-path> "<statement>"
   sceptre explain-analyze <db-path> "<select>"
   sceptre trace <db-path> "<select>"
@@ -55,6 +56,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runSQL(args[1:], stdout, stderr)
 	case "shell":
 		return runShell(args[1:], os.Stdin, stdout, stderr)
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
 	case "explain":
 		return runExplain(args[1:], stdout, stderr)
 	case "explain-analyze":

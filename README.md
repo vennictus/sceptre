@@ -42,7 +42,8 @@ Its product direction is a dependable general-purpose database with useful
 query and storage diagnostics. The current supported behavior and limits are
 documented in [the engine contract](docs/ENGINE_CONTRACT.md). The
 [Go API](docs/API.md) supports typed parameters and serialized multi-statement
-transactions. Network serving and browser integration are not implemented.
+transactions. `sceptre serve` runs a local HTTP service with Sceptre Studio, a
+browser workbench; remote network serving is not implemented yet.
 
 ---
 
@@ -165,6 +166,7 @@ reliability: consistency check ok; crash recovery ok across 9 cases
 | `demo` | Run the guided engine walkthrough | `sceptre demo demo.db --rows 100000` |
 | `sql` | Execute one SQL statement | `sceptre sql app.db "select * from users"` |
 | `shell` | Start an interactive SQL shell | `sceptre shell app.db` |
+| `serve` | Run the local HTTP service and Studio | `sceptre serve app.db` |
 | `explain` | Show the planned access path | `sceptre explain app.db "select * from users where age = 42"` |
 | `explain-analyze` | Run a select and show measured counters | `sceptre explain-analyze app.db "select * from users where age = 42"` |
 | `trace` | Show compact execution row flow | `sceptre trace app.db "select * from users where age = 42"` |
@@ -226,10 +228,11 @@ The detailed supported boundaries are in [PRODUCT_SPEC.md](PRODUCT_SPEC.md).
 ```text
 sceptre/
 ├── sceptre.go           # Public Go API and serialized SQL transactions
-├── cmd/sceptre          # CLI entry point and terminal formatting
+├── cmd/sceptre          # CLI entry point, terminal formatting, serve command
 ├── cmd/sceptre-bench    # Durable workload measurement runner
 ├── docs                # Engine contracts, validation, measured baselines
 ├── internal/bench      # Workloads and measurement accounting
+├── internal/service     # Local HTTP service and embedded Studio
 ├── internal/sql         # Lexer, parser, planner, executor, analyze reports
 ├── internal/table       # Schemas, records, primary keys, secondary indexes, checks
 ├── internal/tx          # Internal transaction primitives and conflict detection
@@ -250,6 +253,7 @@ sceptre/
 | **[PRODUCT_SPEC.md](PRODUCT_SPEC.md)** | Technical design, storage model, transaction scope, file format, and recovery protocol |
 | **[Engine contract](docs/ENGINE_CONTRACT.md)** | Supported guarantees, concurrency and compatibility limits, and implementation map |
 | **[Go API](docs/API.md)** | Typed SQL parameters, multi-statement transactions, lifecycle, bounds, and stable errors |
+| **[Local service](docs/SERVICE.md)** | `sceptre serve` HTTP API, Studio, security model, transactions, and limits |
 | **[Validation](docs/VALIDATION.md)** | Regression, race, coverage, fuzz, and saved-workload replay commands |
 | **[Benchmarks](docs/BENCHMARKS.md)** | Reproducible durable workload methodology and measured baseline |
 | **[PERFORMANCE.md](PERFORMANCE.md)** | Demo results, benchmarks, and performance tradeoffs |

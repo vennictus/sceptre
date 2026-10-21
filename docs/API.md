@@ -1,7 +1,7 @@
 # Go application API
 
 Import `github.com/vennictus/sceptre` from a checkout containing this API. The
-module requires Go 1.22+. There is no network server in this version.
+module requires Go 1.22+. For local HTTP access and Studio, see [the local service](SERVICE.md).
 
 ```go
 db, err := sceptre.Open("app.db", sceptre.Options{})

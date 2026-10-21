@@ -18,8 +18,9 @@ network filesystems, and mixed older/newer binaries sharing a file are unsupport
 Within the owner, the [public Go API](API.md) serializes transactions and coordinates
 all its reads, writes, and close operations. Public callers may use it concurrently.
 Raw internal KV, table, and SQL operations still require caller serialization;
-the internal transaction manager only serializes its commits. There is no server,
-connection pool, or browser integration in this version.
+the internal transaction manager only serializes its commits. `sceptre serve` adds a
+loopback-only HTTP service and Studio over the same API ([local service](SERVICE.md));
+there is no network server, user accounts, TLS, or connection pool in this version.
 
 ## Atomicity and commit outcomes
 
@@ -160,6 +161,7 @@ operational guarantees in this version.
 | --- | --- |
 | `sceptre.go`, `errors.go` | Serialized public execution, transaction lifecycle, result bounds, stable error categories |
 | `cmd/sceptre/main.go` | CLI dispatch, shell, rendering, demo and diagnostics |
+| `cmd/sceptre/serve.go`, `internal/service` | Loopback HTTP service, request security, transaction ownership and expiry, wire encoding, embedded Studio |
 | `internal/sql/parser.go`, `lexer.go`, `validate.go` | Syntax and schema/type binding |
 | `internal/sql/plan.go`, `executor.go`, `analyze.go` | Access selection, materialized execution, diagnostics |
 | `internal/table/table.go`, `scan.go`, `encoding.go` | Catalog, row/index batches, byte/int encoding and scans |
