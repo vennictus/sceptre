@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 var (
@@ -49,7 +50,7 @@ func Open(path string, opts Options) (*Pager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := lockDatabase(file); err != nil {
+	if err := acquireOwnership(file); err != nil {
 		file.Close()
 		return nil, err
 	}
@@ -64,6 +65,27 @@ func Open(path string, opts Options) (*Pager, error) {
 		return nil, err
 	}
 	return pager, nil
+}
+
+// ownershipWait bounds how long Open retries a held lock before reporting it.
+// A lock can stay held briefly after its owner closes: a subprocess started
+// by any goroutine inherits open descriptors until it execs, so it shares the
+// lock for that moment. A real second owner still gets ErrDatabaseLocked.
+var ownershipWait = 500 * time.Millisecond
+
+func acquireOwnership(file *os.File) error {
+	deadline := time.Now().Add(ownershipWait)
+	delay := time.Millisecond
+	for {
+		err := lockDatabase(file)
+		if !errors.Is(err, ErrDatabaseLocked) || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(delay)
+		if delay < 50*time.Millisecond {
+			delay *= 2
+		}
+	}
 }
 
 // Close closes the backing file.
