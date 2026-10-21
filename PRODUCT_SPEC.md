@@ -24,7 +24,7 @@ inspectability, consistency checking, query tracing, and a polished CLI demo.
 
 ## Currently Unsupported
 
-- Network server mode.
+- Network server mode (`sceptre serve` is loopback-only; see docs/SERVICE.md).
 - Multi-process write sharing.
 - Full SQL compatibility.
 - Joins, aggregation, sorting, SQL transaction statements, or MVCC isolation

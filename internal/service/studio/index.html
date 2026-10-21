@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sceptre Studio</title><link rel="stylesheet" href="/studio.css"><script src="/studio.js" defer></script></head>
+<body>
+<header><a class="brand" href="/">SCEPTRE<span>STUDIO</span></a><span class="badge">SINGLE NODE</span><span id="connection" class="connection">Disconnected</span></header>
+<main>
+<section id="login" class="login"><div class="eyebrow">YOUR DATABASE, UP CLOSE</div><h1>A little clarity.<br>A lot of control.</h1><p>Query, inspect, and work with your local Sceptre database.</p><form id="connect-form"><label for="token">Service access token</label><div class="connect-row"><input id="token" type="password" autocomplete="off" required placeholder="Paste the token from sceptre serve"><button type="submit">Connect <span aria-hidden="true">↗</span></button></div></form><p class="hint">The token stays in this tab’s memory. Reloading disconnects Studio.</p></section>
+<div id="workspace" class="workspace" hidden>
+<aside><div class="panel-title"><h2>Schema</h2><button id="refresh" class="quiet" title="Refresh schema">Refresh</button></div><div id="schema" class="schema"></div><div class="sidebar-note">Live schemas and indexes.<br>All commands run against your database.</div></aside>
+<section class="workbench">
+<div class="panel-title"><div><div class="eyebrow">WORKBENCH</div><h1>SQL editor</h1></div><div class="tx-buttons"><button id="begin" class="quiet">Begin transaction</button><button id="commit" class="quiet" disabled>Commit</button><button id="rollback" class="quiet" disabled>Rollback</button></div></div>
+<div id="transaction" class="transaction">Auto-commit · each statement commits independently</div>
+<label class="sr-only" for="sql">SQL statement</label><textarea id="sql" spellcheck="false" placeholder="SELECT * FROM your_table LIMIT 50"></textarea>
+<div class="parameters"><div class="panel-title"><h2>Parameters <span class="hint">positional ? bindings</span></h2><button id="add-param" class="quiet">+ Add parameter</button></div><div id="params"></div></div>
+<div class="execution"><button id="run">Run statement <span aria-hidden="true">↗</span></button><button id="explain" class="quiet">Explain</button><span class="hint">Ctrl / ⌘ + Enter to run</span></div>
+<div class="results-heading"><h2>Output</h2><span id="metrics" class="hint">Ready when you are</span></div><div id="output" class="output"><p class="empty">Your next question starts here.</p></div>
+<details class="history"><summary>Query history <span class="hint">this tab only</span></summary><ol id="history"></ol></details>
+</section></div>
+<div id="notice" role="status" aria-live="polite"></div>
+</main><footer>Sceptre Studio <span>Local database workbench · results capped by the service</span></footer>
+</body></html>
