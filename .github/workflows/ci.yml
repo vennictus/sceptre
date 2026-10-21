@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - 'codex/**'
+      - single-node
   pull_request:
   workflow_dispatch:
 
@@ -68,6 +68,8 @@ jobs:
         run: go vet ./...
       - name: Race checks
         run: go test -race -count=1 -json ./... > "$RUNNER_TEMP/race-results.json"
+      - name: Repeat timing-sensitive suites
+        run: go test -count=5 ./internal/pager ./internal/kv ./internal/service
       - name: Bounded storage corruption fuzz
         run: go test ./internal/btree -run='^$' -fuzz=FuzzValidateTreeNeverPanics -fuzztime=10s -parallel=2
       - name: Bounded SQL parser fuzz
