@@ -8,7 +8,10 @@ describes implemented behavior and its limits; it is not a release-readiness cla
 ## Execution and ownership
 
 One process owns a database file. OS locks reject another Sceptre owner and release
-automatically when the handle closes or the process exits. Use a local filesystem
+automatically when the handle closes or the process exits. Open retries a held
+lock for up to 500 ms before rejecting it: on Unix, a subprocess started by any
+goroutine inherits open descriptors until it execs, so a just-closed handle can
+keep its lock for that moment. Use a local filesystem
 with working locks. Unix locks are advisory. Replacing or renaming an open file,
 network filesystems, and mixed older/newer binaries sharing a file are unsupported.
 

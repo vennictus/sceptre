@@ -53,7 +53,9 @@ The [application API guide](docs/API.md) defines the public lifecycle and errors
 
 The pager locks the database file itself: an exclusive nonblocking byte-range
 lock on Windows, or an advisory flock on supported Unix platforms. A second
-Sceptre owner, including a hard-link alias, receives a lock error. Closing the
+Sceptre owner, including a hard-link alias, receives a lock error after Open
+retries for up to 500 ms; the retry covers a lock briefly inherited by a
+subprocess that has not yet exec'd. Closing the
 handle or terminating its process releases ownership automatically. Legacy
 sidecar `.lock` files are ignored and are not removed by the engine.
 
