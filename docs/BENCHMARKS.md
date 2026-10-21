@@ -22,7 +22,9 @@ Use `-dir` to select an existing parent directory on the filesystem being
 measured. This parent is preserved; only fresh benchmark subdirectories are
 removed. No relaxed durability setting exists. Setup, catalog/index creation,
 seeding, verification, and reopening are excluded from operation latency and
-physical-write counters. Seeding uses batches of up to 1,000 rows. Each workload
+physical-write counters. Latency samples shorter than the recorded
+`clock_resolution_ns` read as 0; Windows monotonic clocks can step in 0.5 ms or
+larger increments, so compare fast operations on a fine-grained clock. Seeding uses batches of up to 1,000 rows. Each workload
 starts with `id int64`, `bucket int64`, `payload bytes`, and a bucket index. Initial
 bucket values are `id % 64`; operation IDs use the recorded deterministic seed.
 
