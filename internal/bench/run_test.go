@@ -57,7 +57,8 @@ func TestReportAccountsForDurableWorkAndCleansOnlyItsDirectories(t *testing.T) {
 				t.Fatalf("durability accounting: %+v", r)
 			}
 		}
-		if r.P50NS > r.P95NS || r.P95NS > r.P99NS || r.P50NS <= 0 || r.SampledPeakHeapBytes == 0 {
+		if r.P50NS > r.P95NS || r.P95NS > r.P99NS || r.P50NS < 0 || r.SampledPeakHeapBytes == 0 ||
+			(r.P50NS == 0 && report.Environment.ClockResolutionNS < 1000) {
 			t.Fatalf("invalid measurements: %+v", r)
 		}
 	}

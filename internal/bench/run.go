@@ -42,6 +42,9 @@ type Environment struct {
 	Revision   string `json:"revision"`
 	PageSize   uint32 `json:"page_size"`
 	Durability string `json:"durability"`
+	// ClockResolutionNS is the smallest observed monotonic clock step. Latency
+	// samples below it are recorded as 0; Windows clocks can step 0.5 ms or more.
+	ClockResolutionNS int64 `json:"clock_resolution_ns"`
 }
 
 type Result struct {
@@ -108,6 +111,7 @@ func Run(opts Options, progress func(Result)) (Report, error) {
 	report := Report{Version: 1, RecordedUTC: time.Now().UTC().Format(time.RFC3339), Environment: Environment{
 		GoVersion: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH, CPU: cpuName(), CPUs: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0),
 		Storage: opts.Storage, Revision: opts.Revision, PageSize: pager.DefaultPageSize, Durability: "page sync + metadata sync per commit; no relaxed durability",
+		ClockResolutionNS: clockResolution(),
 	}}
 	for _, rows := range opts.Rows {
 		for _, payload := range opts.Payloads {
@@ -389,6 +393,22 @@ func sampleHeap(initial uint64) (*atomic.Uint64, func()) {
 		}
 	}()
 	return peak, func() { close(done); <-stopped }
+}
+
+// clockResolution estimates the smallest nonzero step of the monotonic clock.
+func clockResolution() int64 {
+	best := int64(math.MaxInt64)
+	for i := 0; i < 20; i++ {
+		start := time.Now()
+		var step time.Duration
+		for step == 0 {
+			step = time.Since(start)
+		}
+		if int64(step) < best {
+			best = int64(step)
+		}
+	}
+	return best
 }
 
 func cpuName() string {
