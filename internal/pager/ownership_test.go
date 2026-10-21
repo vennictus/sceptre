@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestOwnershipIsExclusiveAcrossProcesses(t *testing.T) {
@@ -45,6 +46,24 @@ func TestOwnershipUsesFileIdentity(t *testing.T) {
 	}
 	if !errors.Is(err, ErrDatabaseLocked) {
 		t.Fatalf("alias escaped ownership: %v", err)
+	}
+}
+
+func TestLiveOwnerIsRejectedAfterBoundedWait(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "db")
+	p := mustOpenPager(t, path)
+	defer p.Close()
+	start := time.Now()
+	other, err := Open(path, Options{})
+	if other != nil {
+		other.Close()
+	}
+	if !errors.Is(err, ErrDatabaseLocked) {
+		t.Fatalf("second owner was not rejected: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < ownershipWait || elapsed > ownershipWait+2*time.Second {
+		t.Fatalf("rejection took %v, want about %v", elapsed, ownershipWait)
 	}
 }
 
