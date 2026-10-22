@@ -33,7 +33,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # no dependencies, so no go.sum to key a cache on
 
       - name: Vet
         run: go vet ./...
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-          cache: true
+          cache: false # no dependencies, so no go.sum to key a cache on
       - name: Vet current Go
         run: go vet ./...
       - name: Race checks
