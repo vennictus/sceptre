@@ -36,7 +36,7 @@ go run ./cmd/sceptre demo quick.db --rows 1000 --force
 ```bash
 go run ./cmd/sceptre sql app.db "create table users (id int64, name bytes, age int64, city bytes, primary key (id))"
 go run ./cmd/sceptre sql app.db "insert into users (id, name, age, city) values (1, 'Ada', 31, 'delhi')"
-go run ./cmd/sceptre sql app.db "insert into users (id, name, age) values (2, 'Grace', 40)"
+go run ./cmd/sceptre sql app.db "insert into users (id, name, age, city) values (2, 'Grace', 40, 'london')"
 go run ./cmd/sceptre sql app.db "select id, name, age from users"
 ```
 
