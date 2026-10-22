@@ -108,7 +108,7 @@ func (w *writer) freeOverflow(e leafEntry) error {
 // valueOf returns an entry's value, reading its overflow chain if needed.
 func valueOf(src pageSource, pageSize int, e leafEntry) ([]byte, error) {
 	if e.overflow == 0 {
-		return append([]byte(nil), e.value...), nil
+		return cloneBytes(e.value), nil
 	}
 	return readOverflow(src, pageSize, e.overflow, e.size)
 }
