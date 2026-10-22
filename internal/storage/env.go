@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/vennictus/sceptre/internal/pager"
 )
@@ -64,7 +65,7 @@ type Env struct {
 	freePages []uint64          // pages holding the committed freelist
 	readers   map[*ReadTxn]uint64
 	failure   error
-	closed    bool
+	closed    atomic.Bool // written under mu; read without it on hot paths
 }
 
 // snapshot is one committed state.
@@ -139,11 +140,11 @@ func openPager(p *pager.Pager, opts Options) (*Env, error) {
 // Close releases the file. Open transactions fail afterwards.
 func (e *Env) Close() error {
 	e.mu.Lock()
-	if e.closed {
+	if e.closed.Load() {
 		e.mu.Unlock()
 		return nil
 	}
-	e.closed = true
+	e.closed.Store(true)
 	e.mu.Unlock()
 	return e.p.Close()
 }
@@ -156,7 +157,7 @@ func (e *Env) Err() error {
 }
 
 func (e *Env) usable() error {
-	if e.closed {
+	if e.closed.Load() {
 		return ErrClosed
 	}
 	return e.failure
@@ -207,7 +208,7 @@ func (src snapshotSource) page(id uint64) ([]byte, error) {
 type ReadTxn struct {
 	e    *Env
 	s    snapshot
-	done bool
+	done atomic.Bool
 }
 
 // BeginRead takes a snapshot of the latest committed state.
@@ -229,19 +230,17 @@ func (r *ReadTxn) TxID() uint64 { return r.s.txid }
 func (r *ReadTxn) Release() {
 	r.e.mu.Lock()
 	defer r.e.mu.Unlock()
-	if !r.done {
-		r.done = true
+	if !r.done.Swap(true) {
 		delete(r.e.readers, r)
 	}
 }
 
+// check runs on every read, so it uses atomic flags instead of the env mutex.
 func (r *ReadTxn) check() error {
-	r.e.mu.Lock()
-	defer r.e.mu.Unlock()
-	if r.done {
+	if r.done.Load() {
 		return ErrTxnClosed
 	}
-	if r.e.closed {
+	if r.e.closed.Load() {
 		return ErrClosed
 	}
 	return nil
