@@ -56,7 +56,13 @@ func (w *writer) drop(id uint64) {
 
 func (w *writer) store(id uint64, page []byte) { w.dirty[id] = page }
 
-func cloneBytes(b []byte) []byte { return append([]byte(nil), b...) }
+// cloneBytes copies b into an exactly sized slice (never nil, so empty values
+// stay distinguishable from missing ones).
+func cloneBytes(b []byte) []byte {
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
 
 // get looks up key in the tree rooted at root.
 func get(src pageSource, l layout, root uint64, key []byte) ([]byte, bool, error) {
