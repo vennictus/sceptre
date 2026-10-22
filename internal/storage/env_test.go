@@ -684,3 +684,44 @@ func TestEnvCheckRejectsSealedBadSeparator(t *testing.T) {
 		t.Fatalf("Check with a wrong separator: %v", err)
 	}
 }
+
+func TestEnvMegabyteValuesSurviveInterruptedCommits(t *testing.T) {
+	t.Parallel()
+	oldValue := bytes.Repeat([]byte("old!"), 1<<18) // 1 MiB
+	newValue := bytes.Repeat([]byte("new?"), 1<<18)
+	for _, stage := range CommitStages() {
+		stage := stage
+		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "db")
+			fail := false
+			e := openEnv(t, path, Options{CommitHook: func(s string) error {
+				if fail && s == stage {
+					return errors.New("interrupted")
+				}
+				return nil
+			}})
+			commit(t, e, func(w *WriteTxn) { put(t, w, "blob", oldValue) })
+			fail = true
+			w, _ := e.BeginWrite()
+			put(t, w, "blob", newValue)
+			put(t, w, "blob2", newValue)
+			w.Commit()
+			e.Close()
+
+			e = openEnv(t, path, Options{})
+			defer e.Close()
+			want := oldValue
+			if stage == StageMetaPublished {
+				want = newValue
+			}
+			if v, _, err := mustRead(t, e, "blob"); err != nil || !bytes.Equal(v, want) {
+				t.Fatalf("1 MiB value after interruption at %s: %d bytes, %v", stage, len(v), err)
+			}
+			rep := mustCheck(t, e)
+			if rep.Data.OverflowPages < overflowPages(e.l.pageSize, len(oldValue)) {
+				t.Fatalf("overflow chain shorter than the value: %+v", rep.Data)
+			}
+		})
+	}
+}
