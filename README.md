@@ -9,7 +9,7 @@
   
 </pre>
 
-**A transparent embedded relational database engine built in Go**
+**An open-source relational database built in Go**
 
 [![CI](https://github.com/vennictus/sceptre/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vennictus/sceptre/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vennictus/sceptre)](https://goreportcard.com/report/github.com/vennictus/sceptre)
@@ -33,14 +33,19 @@
 
 ## What Is Sceptre?
 
-Sceptre is a compact embedded database engine that implements the stack from
-disk pages up to a small SQL layer. It is designed to make database internals
-visible: you can run a query, see the access path, inspect the B+ tree pages,
-view freelist state, and validate recovery behavior from the CLI.
+Sceptre is an open-source relational database in Go, built around a single-file
+B+tree engine. The current implementation supports a bounded SQL subset through
+the CLI and a public Go API, with typed tables, secondary indexes, atomic
+statement mutations,
+inspection, and tested recovery boundaries.
 
-It is a focused engine for studying and
-demonstrating storage, indexing, query execution, consistency, and recovery in
-one readable Go codebase with a built in interactive shell.
+Its product direction is a dependable general-purpose database with useful
+query and storage diagnostics. The current supported behavior and limits are
+documented in [the engine contract](docs/ENGINE_CONTRACT.md). The
+[Go API](docs/API.md) supports typed parameters and serialized multi-statement
+transactions. The CLI includes a built-in interactive shell, and
+`sceptre serve` runs a local HTTP service with Sceptre Studio, a browser
+workbench; remote network serving is not implemented yet.
 
 ---
 
@@ -94,10 +99,11 @@ go run ./cmd/sceptre demo
 <td width="50%">
 
 ### Storage Engine
-- **Single-file database** with fixed-size pages
-- **Dual meta pages** with checksums and generation selection
-- **Copy-on-write commits** through an atomic meta-page publish
-- **Freelist reuse** for pages retired by updates and deletes
+- **Disk-based copy-on-write B+ tree**: commits write only changed pages
+- **Snapshot readers** that never block or wait for the writer
+- **Checksummed pages** with page IDs and writing-transaction IDs
+- **Large values** in overflow pages, up to 1 GiB
+- **Bounded page cache**: the database does not need to fit in memory
 
 </td>
 <td width="50%">
@@ -123,10 +129,10 @@ go run ./cmd/sceptre demo
 <td width="50%">
 
 ### Reliability Tooling
-- **Consistency checker** for schemas, rows, indexes, pages, and freelist state
+- **Consistency checker** that verifies every page, both trees, the freelist, and all rows and indexes
 - **Commit interruption tests** at page-write, sync, and meta-publish stages
 - **Randomized recovery sampling** with reproducible seeds
-- **Single-process ownership lock** to prevent concurrent writers
+- **OS ownership lock** released automatically on process exit
 
 </td>
 </tr>
@@ -163,10 +169,12 @@ reliability: consistency check ok; crash recovery ok across 9 cases
 | `demo` | Run the guided engine walkthrough | `sceptre demo demo.db --rows 100000` |
 | `sql` | Execute one SQL statement | `sceptre sql app.db "select * from users"` |
 | `shell` | Start an interactive SQL shell | `sceptre shell app.db` |
+| `serve` | Run the local HTTP service and Studio | `sceptre serve app.db` |
 | `explain` | Show the planned access path | `sceptre explain app.db "select * from users where age = 42"` |
 | `explain-analyze` | Run a select and show measured counters | `sceptre explain-analyze app.db "select * from users where age = 42"` |
 | `trace` | Show compact execution row flow | `sceptre trace app.db "select * from users where age = 42"` |
 | `check` | Validate database consistency | `sceptre check app.db` |
+| `upgrade` | Convert a format v1 database to v2 | `sceptre upgrade app.db` |
 | `crash-test` | Verify commit interruption recovery | `sceptre crash-test scratch.db --random 20 --seed 42` |
 | `inspect meta` | Show active meta-page state | `sceptre inspect meta app.db` |
 | `inspect pages` | List physical page inventory | `sceptre inspect pages app.db` |
@@ -192,8 +200,38 @@ DELETE FROM users WHERE id = 1;
 
 Supported planner paths include table scans, primary-key lookups,
 primary-key ranges, and exact secondary-index lookups. Joins, aggregations,
-ordering, SQL transactions, and broad SQL compatibility are outside the current
+ordering, SQL transaction syntax, and broad SQL compatibility are outside the current
 scope.
+
+SQL validates column references, predicate types, and update assignments before
+scanning, including queries that match no rows. Primary-key assignments in
+`UPDATE` are rejected; key relocation is not supported. Duplicate INSERT columns
+and UPDATE targets are rejected. `LIMIT` and `OFFSET` must be non-negative;
+`LIMIT 0` returns no rows. Limits bound returned rows, while candidate rows are
+still collected in memory before filtering.
+
+Each SQL UPDATE or DELETE stages its matching row and index changes into one KV
+commit. Validation failures and oversized keys (above 1000 bytes at the default
+page size) preserve the previous statement state; rows can be up to 1 GiB.
+The public Go API coordinates concurrent callers and buffers multiple
+statements, including schema and index changes, until Commit. Raw internal engine
+access still requires serialization. A commit error after metadata publication
+can still mean the complete transaction was committed.
+
+Every page is verified by checksum when read, and `sceptre check` verifies the
+whole file. Pages are reused only when neither an open snapshot nor the previous
+meta generation can reach them, so snapshots never change underneath readers and
+the previous generation stays intact. Uncertain metadata I/O errors require
+closing and reopening the handle before further operations. Regression coverage
+includes torn writes, sync failures, subprocess exits, fallback after an
+interrupted commit, randomized workloads checked against a model, and seeded
+indexed CRUD workloads.
+
+Databases created before format v2 must be converted once with
+`sceptre upgrade <db>`, which verifies the copy and keeps the original as a
+backup.
+
+The detailed supported boundaries are in [PRODUCT_SPEC.md](PRODUCT_SPEC.md).
 
 ---
 
@@ -201,14 +239,19 @@ scope.
 
 ```text
 sceptre/
-├── cmd/sceptre          # CLI entry point and terminal formatting
+├── sceptre.go           # Public Go API and serialized SQL transactions
+├── cmd/sceptre          # CLI entry point, terminal formatting, serve command
+├── cmd/sceptre-bench    # Durable workload measurement runner
+├── docs                # Engine contracts, validation, measured baselines
+├── internal/bench      # Workloads and measurement accounting
+├── internal/service     # Local HTTP service and embedded Studio
 ├── internal/sql         # Lexer, parser, planner, executor, analyze reports
 ├── internal/table       # Schemas, records, primary keys, secondary indexes, checks
 ├── internal/tx          # Internal transaction primitives and conflict detection
-├── internal/kv          # Atomic key/value apply and commit orchestration
-├── internal/btree       # Ordered copy-on-write B+ tree
-├── internal/freelist    # Reusable page tracking
-├── internal/pager       # File pages, meta pages, checksums, fsync, ownership lock
+├── internal/kv          # Atomic key/value batches, snapshots, iterators
+├── internal/storage     # Copy-on-write B+ tree engine: pages, cache, freelist, commits
+├── internal/upgrade     # Format v1 to v2 conversion (with internal/btree for v1)
+├── internal/pager       # File pages, meta slots, format versions, fsync, ownership lock
 └── internal/debug       # Inspection and crash/recovery tooling
 ```
 
@@ -220,6 +263,11 @@ sceptre/
 |:--|:--|
 | **[GUIDE.md](GUIDE.md)** | Hands-on walkthrough of the CLI, demo, inspection, tracing, and recovery tools |
 | **[PRODUCT_SPEC.md](PRODUCT_SPEC.md)** | Technical design, storage model, transaction scope, file format, and recovery protocol |
+| **[Engine contract](docs/ENGINE_CONTRACT.md)** | Supported guarantees, concurrency and compatibility limits, and implementation map |
+| **[Go API](docs/API.md)** | Typed SQL parameters, multi-statement transactions, lifecycle, bounds, and stable errors |
+| **[Local service](docs/SERVICE.md)** | `sceptre serve` HTTP API, Studio, security model, transactions, and limits |
+| **[Validation](docs/VALIDATION.md)** | Regression, race, coverage, fuzz, and saved-workload replay commands |
+| **[Benchmarks](docs/BENCHMARKS.md)** | Reproducible durable workload methodology and measured baseline |
 | **[PERFORMANCE.md](PERFORMANCE.md)** | Demo results, benchmarks, and performance tradeoffs |
 
 ---

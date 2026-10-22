@@ -11,14 +11,19 @@ coverage.out
 *.coverprofile
 .coverprofile
 
-# Local demo databases
+# Local demo databases (test fixtures are kept)
 *.db
+!**/testdata/*.db
 *.db.lock
 *.crash-*/
 
 # Local Go cache / temp dirs
 .gocache/
 .gotmp/
+
+# Reproducible validation output (not source)
+/test-artifacts/
+/benchmark-results/
 
 # Editor / OS noise
 .DS_Store

@@ -2,9 +2,44 @@ package table
 
 import (
 	"encoding/binary"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestCheckReportsCorruptStoragePage(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "db")
+	db := mustOpenTableDB(t, path)
+	mustCreateUsers(t, db)
+	for i := 1; i <= 100; i++ {
+		mustInsertUser(t, db, int64(i), fmt.Sprintf("user-%d", i), 31)
+	}
+	root := db.kv.Env().Info().DataRoot
+	pageSize := int64(db.kv.Pager().PageSize())
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte{0xEE}, int64(root)*pageSize+pageSize/2); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	db = mustOpenTableDB(t, path)
+	defer db.Close()
+	report, err := db.Check()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK() || !hasIssue(report, "storage_invalid") {
+		t.Fatalf("corrupt page passed check: %+v", report)
+	}
+}
 
 func TestCheckReportsHealthyDatabase(t *testing.T) {
 	t.Parallel()
@@ -195,7 +230,7 @@ func TestCheckReportsFreelistPageBounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
-	if !hasIssue(report, "freelist_head_out_of_range") && !hasIssue(report, "freelist_invalid") {
+	if !hasIssue(report, "storage_invalid") {
 		t.Fatalf("Check() issues = %+v, want freelist bounds issue", report.Issues)
 	}
 }

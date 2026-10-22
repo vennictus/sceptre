@@ -1,2 +1,3 @@
-// Package kv exposes the durable key-value layer built on top of the pager and tree.
+// Package kv is the ordered key/value layer on the storage engine: atomic
+// multi-key commits, snapshot reads, and iterators.
 package kv

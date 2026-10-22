@@ -94,7 +94,7 @@ func TestExecuteUpdateDeleteAndIndex(t *testing.T) {
 func mustOpenSQLTable(t *testing.T) *table.DB {
 	t.Helper()
 
-	db, err := table.Open(filepath.Join(t.TempDir(), "sceptre.db"), table.Options{PageSize: 512})
+	db, err := table.Open(filepath.Join(t.TempDir(), "sceptre.db"), table.Options{PageSize: 1024})
 	if err != nil {
 		t.Fatalf("table.Open() error = %v", err)
 	}

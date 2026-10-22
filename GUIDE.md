@@ -3,6 +3,12 @@
 This guide walks through Sceptre from the CLI down to the storage inspection
 tools. It assumes Go 1.22+ and a terminal in the repository root.
 
+Use the [engine contract](docs/ENGINE_CONTRACT.md) for supported semantics,
+[validation guide](docs/VALIDATION.md) for tests and failure replay, and
+[benchmark guide](docs/BENCHMARKS.md) for reproducible workload measurements.
+Use the [Go API guide](docs/API.md) for application integration, typed parameters,
+and multi-statement transactions.
+
 ## 1. Run The Guided Demo
 
 ```bash
@@ -30,7 +36,7 @@ go run ./cmd/sceptre demo quick.db --rows 1000 --force
 ```bash
 go run ./cmd/sceptre sql app.db "create table users (id int64, name bytes, age int64, city bytes, primary key (id))"
 go run ./cmd/sceptre sql app.db "insert into users (id, name, age, city) values (1, 'Ada', 31, 'delhi')"
-go run ./cmd/sceptre sql app.db "insert into users (id, name, age) values (2, 'Grace', 40)"
+go run ./cmd/sceptre sql app.db "insert into users (id, name, age, city) values (2, 'Grace', 40, 'london')"
 go run ./cmd/sceptre sql app.db "select id, name, age from users"
 ```
 
@@ -42,6 +48,25 @@ id  name   age
 1   Ada    31
 2   Grace  40
 ```
+
+SQL errors are checked even when a query would return no rows. For example,
+`select * from users where missing = 1` rejects an unknown column. UPDATE can
+change non-key columns; assigning a primary-key column is currently unsupported
+and returns an error. Repeated INSERT columns or UPDATE targets also return an
+error. Use non-negative LIMIT/OFFSET values; LIMIT 0 returns an empty result.
+
+An UPDATE or DELETE applies all matching rows and index changes in one KV commit.
+Invalid or oversized rows do not leave earlier rows partially updated. A commit
+error can still occur after the complete statement has been published; do not
+assume every error means rollback. CLI SQL statements commit independently. The
+public Go API supports multi-statement transactions and coordinates concurrent
+requests; raw internal engine access still requires serialization.
+
+The OS releases database ownership when a process exits, so restart does not
+require removing a stale lock file. If an operation reports `ErrRecoveryRequired`,
+close and reopen the database before retrying or querying it. Reopening determines
+which complete generation was published. `ErrCommitCommitted` means the operation
+already committed despite the reported error.
 
 ## 3. Add And Use An Index
 
@@ -135,8 +160,11 @@ Inspect reusable pages:
 go run ./cmd/sceptre inspect freelist app.db
 ```
 
-Freelist pages track old pages retired by copy-on-write commits. Those pages can
-be reused by future commits instead of growing the file forever.
+Freelist pages track old pages retired by copy-on-write commits, each tagged
+with the transaction that freed it. A page is reused once no open snapshot and
+no fallback meta generation can still reach it; `reusable_now` shows how many
+qualify. `inspect page` on a free page shows `freed_by_tx`, and on a tree page
+shows `written_by_tx`.
 
 ## 6. Validate Consistency
 
@@ -144,8 +172,19 @@ be reused by future commits instead of growing the file forever.
 go run ./cmd/sceptre check app.db
 ```
 
-The checker validates table rows, secondary-index entries, B+ tree page shape,
-freelist state, page bounds, and storage/catalog consistency.
+The checker first verifies storage: every page's checksum, both B+ trees in
+full, overflow chains, the freelist, and an accounting of every page in the
+file. Then it validates table rows, secondary-index entries, and catalog
+consistency.
+
+If a database was created before format v2, convert it once:
+
+```bash
+go run ./cmd/sceptre upgrade app.db
+```
+
+Upgrade verifies the converted copy before replacing the file and keeps the
+original as `app.db.v1.bak`.
 
 ## 7. Verify Recovery Boundaries
 

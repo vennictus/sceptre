@@ -73,6 +73,9 @@ func executeCreateIndex(db *table.DB, stmt *CreateIndexStmt) (Result, error) {
 }
 
 func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
+	if len(stmt.Columns) == 0 || len(stmt.Columns) != len(stmt.Values) {
+		return Result{}, fmt.Errorf("%w: column/value count mismatch", ErrExec)
+	}
 	def, ok, err := db.Table(stmt.Table)
 	if err != nil {
 		return Result{}, err
@@ -83,6 +86,9 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 
 	values := make(map[string]table.Value, len(stmt.Columns))
 	for i, column := range stmt.Columns {
+		if _, exists := values[column]; exists {
+			return Result{}, fmt.Errorf("%w: duplicate insert column %s", ErrExec, column)
+		}
 		valueType, ok := columnType(def, column)
 		if !ok {
 			return Result{}, fmt.Errorf("%w: unknown column %s", ErrExec, column)
@@ -105,7 +111,7 @@ func executeSelect(db *table.DB, stmt *SelectStmt) (Result, error) {
 		return Result{}, err
 	}
 
-	columns, err := selectColumns(def, stmt)
+	columns, err := validateSelect(def, stmt)
 	if err != nil {
 		return Result{}, err
 	}
@@ -149,6 +155,10 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	assignments, err := validateAssignments(def, stmt.Assignments)
+	if err != nil {
+		return Result{}, err
+	}
 	rows, err := candidateRows(db, def, plan)
 	if err != nil {
 		return Result{}, err
@@ -165,22 +175,16 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 		}
 	}
 
+	updates := make([]table.Record, 0, len(matchesRows))
 	for _, row := range matchesRows {
 		updated := table.NewRecord(row.Values)
-		for _, assignment := range stmt.Assignments {
-			valueType, ok := columnType(def, assignment.Column)
-			if !ok {
-				return Result{}, fmt.Errorf("%w: unknown column %s", ErrExec, assignment.Column)
-			}
-			value, err := literalToValue(assignment.Value, valueType)
-			if err != nil {
-				return Result{}, err
-			}
-			updated.Values[assignment.Column] = value
+		for column, value := range assignments {
+			updated.Values[column] = value
 		}
-		if err := db.Update(stmt.Table, updated); err != nil {
-			return Result{}, err
-		}
+		updates = append(updates, updated)
+	}
+	if err := db.UpdateMany(stmt.Table, updates); err != nil {
+		return Result{}, err
 	}
 	return Result{RowsAffected: len(matchesRows)}, nil
 }
@@ -206,16 +210,15 @@ func executeDelete(db *table.DB, stmt *DeleteStmt) (Result, error) {
 		}
 	}
 
+	keys := make([]table.Record, 0, len(matchesRows))
 	for _, row := range matchesRows {
-		removed, err := db.Delete(stmt.Table, primaryKeyRecord(def, row))
-		if err != nil {
-			return Result{}, err
-		}
-		if !removed {
-			return Result{}, table.ErrRowNotFound
-		}
+		keys = append(keys, primaryKeyRecord(def, row))
 	}
-	return Result{RowsAffected: len(matchesRows)}, nil
+	removed, err := db.DeleteMany(stmt.Table, keys)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{RowsAffected: removed}, nil
 }
 
 type evalResult struct {
@@ -429,6 +432,7 @@ func scanRows(db *table.DB, tableName string, bounds table.ScanBounds) ([]table.
 	if err != nil {
 		return nil, err
 	}
+	defer scanner.Close()
 	var rows []table.Record
 	for scanner.Valid() {
 		row, err := scanner.Deref()

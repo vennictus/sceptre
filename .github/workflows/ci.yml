@@ -1,14 +1,36 @@
 name: ci
 
 on:
+  # Branch work runs through its pull request; pushing to a branch with an
+  # open PR would otherwise run every job twice.
   push:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Go 1.22 linkers omit LC_UUID from some test binaries, and current
+          # macOS refuses to load them ("dyld: missing LC_UUID"). macOS tests
+          # use current stable Go; Linux and Windows test the go.mod minimum.
+          - os: macos-latest
+            go: stable
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      SCEPTRE_TEST_ARTIFACT_DIR: test-artifacts
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Check out repository
@@ -17,11 +39,77 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
+          go-version: ${{ matrix.go }} # when set, takes precedence over the file
           go-version-file: go.mod
-          cache: true
+          cache: false # no dependencies, so no go.sum to key a cache on
 
       - name: Vet
-        run: go vet ./...
+        run: |
+          # Turn findings into annotations, which are visible without signing in.
+          go vet ./... 2>&1 | sed -E 's/^([^ :]+\.go):([0-9]+):([0-9]+): (.*)$/::error file=\1,line=\2,col=\3::\4/'
+          exit "${PIPESTATUS[0]}"
 
       - name: Test
-        run: go test ./...
+        run: go test -count=1 -json -covermode=atomic -coverprofile="$RUNNER_TEMP/coverage.out" ./... > "$RUNNER_TEMP/test-results.json"
+
+      - name: Report failed tests
+        if: failure()
+        run: |
+          # Annotations are visible without signing in, unlike job logs.
+          results="$RUNNER_TEMP/test-results.json"
+          grep '"Action":"fail"' "$results" | grep '"Test":' | sed -E 's/.*"Package":"([^"]*)".*"Test":"([^"]*)".*/::error title=\1::\2 failed/' | head -n 10 || true
+          grep -oE '"Output":"[^"]*_test\.go:[0-9]+:[^"]*' "$results" | sed -E 's/^"Output":" *//; s/[\]n$//; s/^/::error::/' | head -n 10 || true
+          # Package-level failures: build errors, panics, and failures outside a named test.
+          grep '"Action":"fail"' "$results" | grep -v '"Test":' | sed -E 's/.*"Package":"([^"]*)".*/::error title=\1::package failed/' | head -n 10 || true
+          for pkg in $(grep '"Action":"fail"' "$results" | grep -v '"Test":' | sed -E 's/.*"Package":"([^"]*)".*/\1/' | head -n 3); do
+            # The last lines a failed package printed, whatever they are.
+            grep "\"Package\":\"$pkg\"" "$results" | grep '"Action":"output"' | grep -oE '"Output":"[^"]*' | sed -E 's/^"Output":"//; s/[\]n$//; s/[\]t/  /g' | grep -v '^ *$' | tail -n 6 | sed "s|^|::error title=$pkg::|" || true
+          done
+
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/coverage.out
+            ${{ runner.temp }}/test-results.json
+            test-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  race-and-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SCEPTRE_TEST_ARTIFACT_DIR: test-artifacts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false # no dependencies, so no go.sum to key a cache on
+      - name: Vet current Go
+        run: go vet ./...
+      - name: Race checks
+        run: go test -race -count=1 -json ./... > "$RUNNER_TEMP/race-results.json"
+      - name: Repeat timing-sensitive suites
+        run: go test -count=5 ./internal/pager ./internal/kv ./internal/service
+      - name: Bounded storage corruption fuzz
+        run: go test ./internal/btree -run='^$' -fuzz=FuzzValidateTreeNeverPanics -fuzztime=10s -parallel=2
+      - name: Bounded SQL parser fuzz
+        run: go test ./internal/sql -run='^$' -fuzz=FuzzParse -fuzztime=10s -parallel=2
+      - name: Bounded typed parameter fuzz
+        run: go test ./internal/sql -run='^$' -fuzz=FuzzParameterBytes -fuzztime=10s -parallel=2
+      - name: Preserve race and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: race-and-fuzz
+          path: |
+            ${{ runner.temp }}/race-results.json
+            test-artifacts/
+            internal/btree/testdata/fuzz/
+            internal/sql/testdata/fuzz/
+          if-no-files-found: warn
+          retention-days: 14
