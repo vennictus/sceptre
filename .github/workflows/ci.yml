@@ -41,6 +41,14 @@ jobs:
       - name: Test
         run: go test -count=1 -json -covermode=atomic -coverprofile="$RUNNER_TEMP/coverage.out" ./... > "$RUNNER_TEMP/test-results.json"
 
+      - name: Report failed tests
+        if: failure()
+        run: |
+          # Annotations are visible without signing in, unlike job logs.
+          results="$RUNNER_TEMP/test-results.json"
+          grep '"Action":"fail"' "$results" | grep '"Test":' | sed -E 's/.*"Package":"([^"]*)".*"Test":"([^"]*)".*/::error title=\1::\2 failed/' | head -n 10 || true
+          grep -oE '"Output":"[^"]*_test\.go:[0-9]+:[^"]*' "$results" | sed -E 's/^"Output":" *//; s/[\]n$//; s/^/::error::/' | head -n 10 || true
+
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@v4
