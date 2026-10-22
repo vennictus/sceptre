@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -612,5 +613,74 @@ func TestEnvDeleteEverythingThenReuse(t *testing.T) {
 	}
 	if fmt.Sprint(keysOf(got)) != "[again again2]" {
 		t.Fatalf("contents %v", keysOf(got))
+	}
+}
+
+// rewritePage applies change to a page on disk and reseals it, modeling a
+// logically wrong page that still passes its checksum (a bug, not bit rot).
+func rewritePage(t *testing.T, path string, pageSize int, id uint64, change func([]byte)) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	page := make([]byte, pageSize)
+	if _, err := f.ReadAt(page, int64(id)*int64(pageSize)); err != nil {
+		t.Fatal(err)
+	}
+	change(page)
+	seal(page, id, txIDOf(page))
+	if _, err := f.WriteAt(page, int64(id)*int64(pageSize)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnvOpenRejectsSealedBadFreelist(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "db")
+	e := openEnv(t, path, Options{PageSize: 1024})
+	for i := 0; i < 5; i++ {
+		commit(t, e, func(w *WriteTxn) { put(t, w, "k", []byte(fmt.Sprint(i))) })
+	}
+	head := e.Freelist().Head
+	if head == 0 {
+		t.Fatal("fixture has no freelist")
+	}
+	e.Close()
+	rewritePage(t, path, 1024, head, func(p []byte) {
+		binary.LittleEndian.PutUint64(p[freeEntriesOff:], 1<<40) // far outside the file
+	})
+	if e, err := Open(path, Options{}); !errors.Is(err, ErrPageCorrupt) {
+		if e != nil {
+			e.Close()
+		}
+		t.Fatalf("Open with an out-of-range free page: %v", err)
+	}
+}
+
+func TestEnvCheckRejectsSealedBadSeparator(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "db")
+	e := openEnv(t, path, Options{PageSize: 1024})
+	commit(t, e, func(w *WriteTxn) {
+		for i := 0; i < 300; i++ {
+			put(t, w, fmt.Sprintf("key%04d", i), []byte("v"))
+		}
+	})
+	root := e.Info().DataRoot
+	e.Close()
+	rewritePage(t, path, 1024, root, func(p []byte) {
+		if typeOf(p) != pageBranch {
+			t.Fatal("fixture root is not a branch")
+		}
+		at := int(binary.LittleEndian.Uint16(p[nodeSlotsOff:]))
+		keyLen := int(binary.LittleEndian.Uint16(p[at+8:]))
+		p[at+branchCellHeader+keyLen-1]-- // separator no longer equals its child's maximum
+	})
+	e = openEnv(t, path, Options{})
+	defer e.Close()
+	if _, err := e.Check(); !errors.Is(err, ErrPageCorrupt) {
+		t.Fatalf("Check with a wrong separator: %v", err)
 	}
 }

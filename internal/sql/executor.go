@@ -432,6 +432,7 @@ func scanRows(db *table.DB, tableName string, bounds table.ScanBounds) ([]table.
 	if err != nil {
 		return nil, err
 	}
+	defer scanner.Close()
 	var rows []table.Record
 	for scanner.Valid() {
 		row, err := scanner.Deref()

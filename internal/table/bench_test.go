@@ -99,7 +99,7 @@ func BenchmarkSecondaryIndexLookup(b *testing.B) {
 func mustOpenBenchDB(b *testing.B) *DB {
 	b.Helper()
 
-	db, err := Open(filepath.Join(b.TempDir(), "sceptre.db"), Options{PageSize: 512})
+	db, err := Open(filepath.Join(b.TempDir(), "sceptre.db"), Options{PageSize: 1024})
 	if err != nil {
 		b.Fatalf("Open() error = %v", err)
 	}

@@ -20,7 +20,7 @@ func TestSQLRejectsPrimaryKeyAssignmentsWithoutChangingRows(t *testing.T) {
 	} {
 		t.Run(query, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "db")
-			db, err := table.Open(path, table.Options{PageSize: 512})
+			db, err := table.Open(path, table.Options{PageSize: 1024})
 			if err != nil {
 				t.Fatal(err)
 			}

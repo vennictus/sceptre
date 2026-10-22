@@ -1,7 +1,7 @@
 package kv
 
 import (
-	"encoding/binary"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vennictus/sceptre/internal/pager"
+	"github.com/vennictus/sceptre/internal/storage"
 )
 
 func TestKVSetGetDelAcrossReopen(t *testing.T) {
@@ -76,29 +77,56 @@ func TestKVAtomicVisibilityFallsBackToPreviousMeta(t *testing.T) {
 	assertKVValue(t, reopened, "alpha", "v1", true)
 }
 
-func TestKVOpenRejectsCorruptLeafPage(t *testing.T) {
+// Open verifies the meta page, tree directory, and freelist. Data pages are
+// verified by checksum when read, and in full by Check.
+func TestKVDetectsCorruptPages(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "sceptre.db")
 	store := mustOpenKV(t, path)
-
 	if err := store.Set([]byte("alpha"), []byte("one")); err != nil {
 		t.Fatalf("Set(alpha) error = %v", err)
 	}
-
-	rootPage := store.Pager().Meta().RootPage
+	info := store.Env().Info()
 	pageSize := store.Pager().PageSize()
-	dbPath := store.Pager().Path()
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	corruptFirstNodeSlotOffset(t, dbPath, pageSize, rootPage)
+	corruptPageByte(t, path, pageSize, info.DataRoot)
+	reopened := mustOpenKV(t, path)
+	if _, _, err := reopened.Get([]byte("alpha")); !IsCorrupt(err) {
+		t.Fatalf("Get over corrupt data page error = %v", err)
+	}
+	if _, err := reopened.Check(); !IsCorrupt(err) {
+		t.Fatalf("Check over corrupt data page error = %v", err)
+	}
+	reopened.Close()
 
-	reopened, err := Open(dbPath, Options{})
-	if err == nil {
-		reopened.Close()
-		t.Fatal("Open() error = nil, want corrupt page error")
+	corruptPageByte(t, path, pageSize, info.DirectoryRoot)
+	if s, err := Open(path, Options{}); !IsCorrupt(err) {
+		if s != nil {
+			s.Close()
+		}
+		t.Fatalf("Open with corrupt tree directory error = %v", err)
+	}
+}
+
+func corruptPageByte(t *testing.T, path string, pageSize uint32, pageID uint64) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	offset := int64(pageID)*int64(pageSize) + int64(pageSize)/2
+	buf := make([]byte, 1)
+	if _, err := file.ReadAt(buf, offset); err != nil {
+		t.Fatal(err)
+	}
+	buf[0] ^= 0x5A
+	if _, err := file.WriteAt(buf, offset); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -154,17 +182,26 @@ func TestKVApplyRollsBackProcessViewOnError(t *testing.T) {
 		t.Fatalf("Set(alpha) error = %v", err)
 	}
 
-	hugeValue := make([]byte, 1024)
+	hugeKey := bytes.Repeat([]byte("k"), 1024)
 	err := store.Apply([]Mutation{
 		Put([]byte("alpha"), []byte("uno")),
-		Put([]byte("oversized"), hugeValue),
+		Put(hugeKey, []byte("v")),
 	})
-	if err == nil {
-		t.Fatal("Apply() error = nil, want oversized value failure")
+	if !errors.Is(err, storage.ErrKeyTooLarge) {
+		t.Fatalf("Apply() error = %v, want oversized key failure", err)
 	}
 
 	assertKVValue(t, store, "alpha", "one", true)
-	assertKVValue(t, store, "oversized", "", false)
+
+	// Large values are stored in overflow pages.
+	big := bytes.Repeat([]byte("v"), 64*1024)
+	if err := store.Set([]byte("big"), big); err != nil {
+		t.Fatalf("Set(64 KiB value) error = %v", err)
+	}
+	got, ok, err := store.Get([]byte("big"))
+	if err != nil || !ok || !bytes.Equal(got, big) {
+		t.Fatalf("Get(big) = %d bytes, %v, %v", len(got), ok, err)
+	}
 }
 
 func TestKVInterruptedPreMetaCommitDoesNotAdvancePageCount(t *testing.T) {
@@ -184,7 +221,7 @@ func TestKVInterruptedPreMetaCommitDoesNotAdvancePageCount(t *testing.T) {
 			}
 
 			before := store.Pager().Meta().PageCount
-			store.commitHook = failAfterCommitStage(stage)
+			store.setCommitHook(failAfterCommitStage(stage))
 			err := store.Set([]byte("alpha"), []byte("uno"))
 			if !errors.Is(err, errCommitInterrupted) {
 				t.Fatalf("Set(alpha=uno) error = %v, want %v", err, errCommitInterrupted)
@@ -234,7 +271,7 @@ func TestKVInterruptedSetMaintainsProcessView(t *testing.T) {
 				t.Fatalf("Set(beta=two) error = %v", err)
 			}
 
-			store.commitHook = failAfterCommitStage(tc.stage)
+			store.setCommitHook(failAfterCommitStage(tc.stage))
 			err := store.Set([]byte("alpha"), []byte("uno"))
 			if !errors.Is(err, errCommitInterrupted) {
 				t.Fatalf("Set(alpha=uno) error = %v, want %v", err, errCommitInterrupted)
@@ -282,7 +319,7 @@ func TestKVInterruptedDeleteMaintainsProcessView(t *testing.T) {
 				t.Fatalf("Set(beta=two) error = %v", err)
 			}
 
-			store.commitHook = failAfterCommitStage(tc.stage)
+			store.setCommitHook(failAfterCommitStage(tc.stage))
 			removed, err := store.Del([]byte("beta"))
 			if !errors.Is(err, errCommitInterrupted) {
 				t.Fatalf("Del(beta) error = %v, want %v", err, errCommitInterrupted)
@@ -332,7 +369,7 @@ func TestKVRecoveryAcrossPartialCommitBoundaries(t *testing.T) {
 				t.Fatalf("Set(beta=two) error = %v", err)
 			}
 
-			store.commitHook = failAfterCommitStage(tc.stage)
+			store.setCommitHook(failAfterCommitStage(tc.stage))
 			err := store.Set([]byte("alpha"), []byte("uno"))
 			if !errors.Is(err, errCommitInterrupted) {
 				t.Fatalf("Set(alpha=uno) error = %v, want %v", err, errCommitInterrupted)
@@ -386,7 +423,7 @@ func TestKVDeleteRecoveryAcrossPartialCommitBoundaries(t *testing.T) {
 				t.Fatalf("Set(beta=two) error = %v", err)
 			}
 
-			store.commitHook = failAfterCommitStage(tc.stage)
+			store.setCommitHook(failAfterCommitStage(tc.stage))
 			removed, err := store.Del([]byte("beta"))
 			if !errors.Is(err, errCommitInterrupted) {
 				t.Fatalf("Del(beta) error = %v, want %v", err, errCommitInterrupted)
@@ -423,9 +460,10 @@ func TestKVReusesFreedPagesAcrossCommits(t *testing.T) {
 		counts = append(counts, store.Pager().Meta().PageCount)
 	}
 
-	// Both metadata generations retain their tree and freelist pages.
-	if counts[len(counts)-1] > 8 {
-		t.Fatalf("final page count = %d, want <= 8 (counts=%v)", counts[len(counts)-1], counts)
+	// Both metadata generations retain their tree, directory, and freelist
+	// pages, so each update settles at three live generations of three pages.
+	if counts[len(counts)-1] > 11 {
+		t.Fatalf("final page count = %d, want <= 11 (counts=%v)", counts[len(counts)-1], counts)
 	}
 	if counts[3] != counts[4] || counts[4] != counts[5] {
 		t.Fatalf("page count did not stabilize after reuse: %v", counts)
@@ -467,7 +505,7 @@ func TestKVLoadsFreeListOnReopenForReuse(t *testing.T) {
 func mustOpenKV(t *testing.T, path string) *KV {
 	t.Helper()
 
-	store, err := Open(path, Options{PageSize: 512})
+	store, err := Open(path, Options{PageSize: 1024})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -515,38 +553,18 @@ func corruptMetaMagicByte(t *testing.T, path string, slot int, pageSize uint32) 
 	}
 }
 
-func corruptFirstNodeSlotOffset(t *testing.T, path string, pageSize uint32, pageID uint64) {
-	t.Helper()
-
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatalf("OpenFile() error = %v", err)
-	}
-	defer file.Close()
-
-	offset := int64(pageID)*int64(pageSize) + 8
-	buf := make([]byte, 2)
-	binary.LittleEndian.PutUint16(buf, uint16(pageSize-1))
-	if _, err := file.WriteAt(buf, offset); err != nil {
-		t.Fatalf("WriteAt() error = %v", err)
-	}
-	if err := file.Sync(); err != nil {
-		t.Fatalf("Sync() error = %v", err)
-	}
-}
-
-func TestKVRejectsFormatV2Files(t *testing.T) {
+func TestKVRequiresUpgradeForV1Files(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "v2.db")
-	p, err := pager.Open(path, pager.Options{Format: pager.FormatV2})
+	path := filepath.Join(t.TempDir(), "v1.db")
+	p, err := pager.Open(path, pager.Options{Format: pager.FormatV1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.Close()
-	if store, err := Open(path, Options{}); !errors.Is(err, pager.ErrUnsupportedVersion) {
+	if store, err := Open(path, Options{}); !errors.Is(err, ErrUpgradeRequired) {
 		if store != nil {
 			store.Close()
 		}
-		t.Fatalf("Open(v2 file) error = %v", err)
+		t.Fatalf("Open(v1 file) error = %v", err)
 	}
 }

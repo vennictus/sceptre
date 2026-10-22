@@ -27,7 +27,7 @@ type workloadHistory struct {
 
 func generatedHistory(seed int64) workloadHistory {
 	rng := rand.New(rand.NewSource(seed))
-	h := workloadHistory{Version: 1, Seed: seed, PageSize: 512}
+	h := workloadHistory{Version: 1, Seed: seed, PageSize: 1024}
 	for step := 0; step < 300; step++ {
 		id := int64(rng.Intn(50))
 		body := fmt.Sprintf("v%03d-%s", step, strings.Repeat("q", rng.Intn(140)))
@@ -52,7 +52,7 @@ func readHistory(path string) (workloadHistory, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return h, fmt.Errorf("history contains trailing or oversized data")
 	}
-	if h.Version != 1 || h.PageSize != 512 || len(h.Operations) == 0 || len(h.Operations) > 10000 {
+	if h.Version != 1 || h.PageSize != 1024 || len(h.Operations) == 0 || len(h.Operations) > 10000 {
 		return h, fmt.Errorf("invalid workload history header")
 	}
 	for _, op := range h.Operations {

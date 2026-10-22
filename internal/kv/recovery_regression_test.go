@@ -1,8 +1,6 @@
 package kv
 
 import (
-	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,111 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/vennictus/sceptre/internal/btree"
-	"github.com/vennictus/sceptre/internal/freelist"
 	"github.com/vennictus/sceptre/internal/pager"
 )
-
-func TestOpenRejectsUnsafeFreeEntries(t *testing.T) {
-	t.Parallel()
-	for _, kind := range []string{"root", "reserved", "outside", "duplicate", "freelist"} {
-		t.Run(kind, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "db")
-			s := mustOpenKV(t, path)
-			for i := 0; i < 4; i++ {
-				if err := s.Set([]byte("x"), []byte(fmt.Sprint(i))); err != nil {
-					t.Fatal(err)
-				}
-			}
-			meta := s.Pager().Meta()
-			free := append([]uint64(nil), s.free.FreePages...)
-			if len(free) < 2 {
-				t.Fatal("fixture needs at least two free entries")
-			}
-			switch kind {
-			case "root":
-				free[0] = meta.RootPage
-			case "reserved":
-				free[0] = 0
-			case "outside":
-				free[0] = meta.PageCount
-			case "duplicate":
-				free[1] = free[0]
-			case "freelist":
-				free[0] = meta.FreeListPage
-			}
-			page, err := freelist.EncodePage(int(meta.PageSize), 0, free)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Pager().WritePage(meta.FreeListPage, page); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Close(); err != nil {
-				t.Fatal(err)
-			}
-			opened, err := Open(path, Options{})
-			if err == nil {
-				opened.Close()
-				t.Fatal("unsafe freelist accepted")
-			}
-		})
-	}
-}
-
-func TestOpenRejectsInvalidRoutingGraphs(t *testing.T) {
-	t.Parallel()
-	for _, kind := range []string{"separator", "cycle", "duplicate_child", "overlapping_cells", "empty_header"} {
-		t.Run(kind, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "db")
-			s, err := Open(path, Options{PageSize: 512})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var writes []Mutation
-			for i := 0; i < 100; i++ {
-				writes = append(writes, Put([]byte(fmt.Sprintf("%04d", i)), bytes.Repeat([]byte("v"), 30)))
-			}
-			if err := s.Apply(writes); err != nil {
-				t.Fatal(err)
-			}
-			root := s.Pager().Meta().RootPage
-			page, err := s.Pager().ReadPage(root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			n, err := btree.WrapNode(page)
-			if err != nil || n.Type() != btree.NodeTypeInternal || n.Count() < 2 {
-				t.Fatalf("bad fixture: %v", err)
-			}
-			first := int(binary.LittleEndian.Uint16(page[8:]))
-			second := int(binary.LittleEndian.Uint16(page[10:]))
-			switch kind {
-			case "separator":
-				page[first+10+3]--
-			case "cycle":
-				binary.LittleEndian.PutUint64(page[first:], root)
-			case "duplicate_child":
-				copy(page[second:second+8], page[first:first+8])
-			case "overlapping_cells":
-				copy(page[10:12], page[8:10])
-			case "empty_header":
-				clear(page[2:8])
-			}
-			if err := s.Pager().WritePage(root, page); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Close(); err != nil {
-				t.Fatal(err)
-			}
-			opened, err := Open(path, Options{})
-			if err == nil {
-				opened.Close()
-				t.Fatal("invalid routing accepted")
-			}
-		})
-	}
-}
 
 func TestFallbackAfterRepeatedReuseAndInterruptedCommit(t *testing.T) {
 	t.Parallel()
@@ -193,7 +88,7 @@ func TestIteratorRetainsSnapshotThroughWritesAndFailures(t *testing.T) {
 	if err := s.Apply(writes); err != nil {
 		t.Fatal(err)
 	}
-	s.commitHook = failAfterCommitStage(commitStagePagesSynced)
+	s.setCommitHook(failAfterCommitStage(commitStagePagesSynced))
 	if err := s.Set([]byte("failed"), []byte("value")); err == nil {
 		t.Fatal("expected failure")
 	}
@@ -236,7 +131,7 @@ func TestPhysicalIOFailuresPreserveOrRequireRecovery(t *testing.T) {
 			fired, syncs := false, 0
 			hooks := &pager.IOHooks{
 				WriteAt: func(f *os.File, data []byte, offset int64) (int, error) {
-					meta := offset < 2*512
+					meta := offset < 2*1024
 					if !fired && ((kind == "data_short" && !meta) || (kind == "meta_short" && meta)) {
 						fired = true
 						// Write a real torn metadata prefix, not just a synthetic error.

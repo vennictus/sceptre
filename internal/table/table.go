@@ -209,6 +209,7 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 	if err != nil {
 		return err
 	}
+	defer scanner.Close()
 	for scanner.Valid() {
 		row, err := scanner.Deref()
 		if err != nil {
@@ -264,6 +265,7 @@ func (db *DB) LookupIndex(tableName, indexName string, values Record) ([]Record,
 	upper, hasUpper := prefixEnd(prefix)
 
 	iter := db.store.ScanIterator()
+	defer iter.Close()
 	if err := iter.SeekGE(prefix); err != nil {
 		return nil, err
 	}
