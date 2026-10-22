@@ -180,6 +180,26 @@ func (p *Pager) ReadPage(pageID uint64) ([]byte, error) {
 	return page, nil
 }
 
+// ReadPageInto reads a full non-meta page into buf without consulting the
+// active meta, so readers of older snapshots never race with PublishMeta.
+// Callers bound pageID by the page count of the snapshot they read.
+func (p *Pager) ReadPageInto(pageID uint64, buf []byte) error {
+	if pageID < MetaPageCount {
+		return ErrReservedPageID
+	}
+	if len(buf) != int(p.pageSize) {
+		return ErrInvalidPageBuffer
+	}
+	n, err := p.file.ReadAt(buf, p.pageOffset(pageID))
+	if n == len(buf) {
+		return nil
+	}
+	if err == nil || errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: page %d", ErrShortPageRead, pageID)
+	}
+	return err
+}
+
 // WritePage writes a full non-meta page by page ID.
 func (p *Pager) WritePage(pageID uint64, page []byte) error {
 	if pageID < MetaPageCount {
