@@ -24,6 +24,7 @@ const (
 	tokenLessEqual
 	tokenGreater
 	tokenGreaterEqual
+	tokenParameter
 )
 
 type token struct {
@@ -41,6 +42,9 @@ func lex(input string) ([]token, error) {
 		}
 
 		switch input[i] {
+		case '?':
+			tokens = append(tokens, token{kind: tokenParameter, text: "?"})
+			i++
 		case ',':
 			tokens = append(tokens, token{kind: tokenComma, text: ","})
 			i++

@@ -10,8 +10,14 @@ import (
 
 const (
 	DefaultPageSize uint32 = 4096
-	FormatVersion   uint32 = 1
 	MetaPageCount          = 2
+
+	// FormatV1 is the layout of the in-memory engine; FormatV2 is the layout of
+	// the disk-based copy-on-write engine. Both share this meta page encoding.
+	FormatV1 uint32 = 1
+	FormatV2 uint32 = 2
+	// FormatVersion is the format used for new files when none is requested.
+	FormatVersion = FormatV2
 
 	metaMagicSize      = 8
 	metaChecksumOffset = 48
@@ -35,6 +41,7 @@ var (
 
 // Meta describes the durable root state stored in the reserved meta pages.
 type Meta struct {
+	Version      uint32 // file format; 0 means FormatVersion when encoding
 	PageSize     uint32
 	RootPage     uint64
 	FreeListPage uint64
@@ -50,7 +57,11 @@ func (m Meta) Encode() ([]byte, error) {
 
 	page := make([]byte, m.PageSize)
 	copy(page[:metaMagicSize], metaMagic)
-	putUint32(page[metaVersionOffset:], FormatVersion)
+	version := m.Version
+	if version == 0 {
+		version = FormatVersion
+	}
+	putUint32(page[metaVersionOffset:], version)
 	putUint32(page[metaPageSizeOffset:], m.PageSize)
 	putUint64(page[metaRootOffset:], m.RootPage)
 	putUint64(page[metaFreeListOffset:], m.FreeListPage)
@@ -70,7 +81,7 @@ func DecodeMeta(page []byte) (Meta, error) {
 	}
 
 	version := binary.LittleEndian.Uint32(page[metaVersionOffset:])
-	if version != FormatVersion {
+	if version != FormatV1 && version != FormatV2 {
 		return Meta{}, fmt.Errorf("%w: %d", ErrUnsupportedVersion, version)
 	}
 
@@ -83,6 +94,7 @@ func DecodeMeta(page []byte) (Meta, error) {
 	}
 
 	return Meta{
+		Version:      version,
 		PageSize:     pageSize,
 		RootPage:     binary.LittleEndian.Uint64(page[metaRootOffset:]),
 		FreeListPage: binary.LittleEndian.Uint64(page[metaFreeListOffset:]),

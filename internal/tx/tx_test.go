@@ -191,7 +191,7 @@ func TestManagerTracksActiveSnapshots(t *testing.T) {
 func mustOpenKV(t *testing.T) *kv.KV {
 	t.Helper()
 
-	store, err := kv.Open(filepath.Join(t.TempDir(), "sceptre.db"), kv.Options{PageSize: 512})
+	store, err := kv.Open(filepath.Join(t.TempDir(), "sceptre.db"), kv.Options{PageSize: 1024})
 	if err != nil {
 		t.Fatalf("kv.Open() error = %v", err)
 	}

@@ -45,6 +45,7 @@ type interfaceIterator interface {
 	SeekGE([]byte) error
 	Next() error
 	Deref() ([]byte, []byte, error)
+	Close() error
 }
 
 // Scan creates a scanner over a table's primary-key range.
@@ -80,18 +81,22 @@ func (db *DB) Scan(tableName string, bounds ScanBounds) (*Scanner, error) {
 		upperInclusive = bounds.Upper.Inclusive
 	}
 
-	iter := db.kv.Iterator()
-	if err := iter.SeekGE(lower); err != nil {
+	iter := db.store.ScanIterator()
+	fail := func(err error) (*Scanner, error) {
+		iter.Close()
 		return nil, err
+	}
+	if err := iter.SeekGE(lower); err != nil {
+		return fail(err)
 	}
 	if !lowerInclusive && iter.Valid() {
 		key, _, err := iter.Deref()
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 		if bytes.Equal(key, lower) {
 			if err := iter.Next(); err != nil {
-				return nil, err
+				return fail(err)
 			}
 		}
 	}
@@ -103,9 +108,17 @@ func (db *DB) Scan(tableName string, bounds ScanBounds) (*Scanner, error) {
 		upperInclusive: upperInclusive,
 	}
 	if err := scanner.advance(); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	return scanner, nil
+}
+
+// Close releases the scanner's snapshot. Repeated calls are safe.
+func (s *Scanner) Close() error {
+	if s == nil || s.iter == nil {
+		return nil
+	}
+	return s.iter.Close()
 }
 
 // Valid reports whether the scanner is positioned on a row.

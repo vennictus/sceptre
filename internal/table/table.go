@@ -81,6 +81,7 @@ type Record struct {
 // DB maps table definitions and rows onto the durable KV layer.
 type DB struct {
 	kv    *kv.KV
+	store kv.Store
 	ownKV bool
 }
 
@@ -93,12 +94,15 @@ func Open(path string, opts Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DB{kv: store, ownKV: true}, nil
+	return &DB{kv: store, store: store, ownKV: true}, nil
 }
 
 // New wraps an existing KV store with table operations.
 func New(store *kv.KV) *DB {
-	return &DB{kv: store}
+	if store == nil {
+		return &DB{}
+	}
+	return &DB{kv: store, store: store}
 }
 
 // Close closes the backing KV store if this DB opened it.
@@ -130,7 +134,7 @@ func NewRecord(values map[string]Value) Record {
 
 // CreateTable stores a new table definition and assigns it a unique key prefix.
 func (db *DB) CreateTable(def TableDef) error {
-	if db == nil || db.kv == nil {
+	if db == nil || db.store == nil {
 		return ErrTableNotFound
 	}
 	if err := validateTableDef(def, false); err != nil {
@@ -156,7 +160,7 @@ func (db *DB) CreateTable(def TableDef) error {
 	if err != nil {
 		return err
 	}
-	return db.kv.Apply([]kv.Mutation{
+	return db.store.Apply([]kv.Mutation{
 		kv.Put(catalogMetaKey, nextPrefix),
 		kv.Put(catalogTableKey(def.Name), encoded),
 	})
@@ -164,10 +168,10 @@ func (db *DB) CreateTable(def TableDef) error {
 
 // Table loads a table definition by name.
 func (db *DB) Table(name string) (TableDef, bool, error) {
-	if db == nil || db.kv == nil {
+	if db == nil || db.store == nil {
 		return TableDef{}, false, ErrTableNotFound
 	}
-	value, ok, err := db.kv.Get(catalogTableKey(name))
+	value, ok, err := db.store.Get(catalogTableKey(name))
 	if err != nil || !ok {
 		return TableDef{}, ok, err
 	}
@@ -205,6 +209,7 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 	if err != nil {
 		return err
 	}
+	defer scanner.Close()
 	for scanner.Valid() {
 		row, err := scanner.Deref()
 		if err != nil {
@@ -226,7 +231,7 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 		return err
 	}
 	mutations = append(mutations, kv.Put(catalogTableKey(def.Name), encoded))
-	return db.kv.Apply(mutations)
+	return db.store.Apply(mutations)
 }
 
 // Index loads an index definition by name.
@@ -259,7 +264,8 @@ func (db *DB) LookupIndex(tableName, indexName string, values Record) ([]Record,
 	}
 	upper, hasUpper := prefixEnd(prefix)
 
-	iter := db.kv.Iterator()
+	iter := db.store.ScanIterator()
+	defer iter.Close()
 	if err := iter.SeekGE(prefix); err != nil {
 		return nil, err
 	}
@@ -329,7 +335,7 @@ func (db *DB) InsertMany(tableName string, records []Record) error {
 		}
 		seen[keyString] = struct{}{}
 
-		if _, exists, err := db.kv.Get(rowKey); err != nil {
+		if _, exists, err := db.store.Get(rowKey); err != nil {
 			return err
 		} else if exists {
 			return ErrRowExists
@@ -346,12 +352,42 @@ func (db *DB) InsertMany(tableName string, records []Record) error {
 		}
 		mutations = append(mutations, puts...)
 	}
-	return db.kv.Apply(mutations)
+	return db.store.Apply(mutations)
 }
 
 // Update overwrites an existing row and fails if the primary key is missing.
 func (db *DB) Update(tableName string, record Record) error {
 	return db.writeRow(tableName, record, writeUpdateOnly)
+}
+
+// UpdateMany overwrites existing rows and their indexes in one durable commit.
+// Records must have distinct primary keys; no changes are applied if staging fails.
+func (db *DB) UpdateMany(tableName string, records []Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(records))
+	mutations := make([]kv.Mutation, 0, len(records)*(1+2*len(def.Indexes)))
+	for _, record := range records {
+		changes, err := db.rowMutations(def, record, writeUpdateOnly)
+		if err != nil {
+			return err
+		}
+		key, err := encodeRowKey(def, primaryKeyRecord(def, record))
+		if err != nil {
+			return err
+		}
+		if _, exists := seen[string(key)]; exists {
+			return fmt.Errorf("%w: duplicate update primary key", ErrInvalidRecord)
+		}
+		seen[string(key)] = struct{}{}
+		mutations = append(mutations, changes...)
+	}
+	return db.store.Apply(mutations)
 }
 
 // Upsert writes a row regardless of whether it already exists.
@@ -373,7 +409,7 @@ func (db *DB) Get(tableName string, key Record) (Record, bool, error) {
 	if err != nil {
 		return Record{}, false, err
 	}
-	data, ok, err := db.kv.Get(rowKey)
+	data, ok, err := db.store.Get(rowKey)
 	if err != nil || !ok {
 		return Record{}, ok, err
 	}
@@ -408,7 +444,7 @@ func (db *DB) Delete(tableName string, key Record) (bool, error) {
 		return false, err
 	}
 	mutations = append([]kv.Mutation{kv.Delete(rowKey)}, mutations...)
-	if err := db.kv.Apply(mutations); err != nil {
+	if err := db.store.Apply(mutations); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -459,7 +495,7 @@ func (db *DB) DeleteMany(tableName string, keys []Record) (int, error) {
 	if len(mutations) == 0 {
 		return 0, nil
 	}
-	if err := db.kv.Apply(mutations); err != nil {
+	if err := db.store.Apply(mutations); err != nil {
 		return 0, err
 	}
 	return removed, nil
@@ -478,56 +514,64 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	if err != nil {
 		return err
 	}
-	if err := validateFullRecord(def, record); err != nil {
+	mutations, err := db.rowMutations(def, record, mode)
+	if err != nil {
 		return err
+	}
+	return db.store.Apply(mutations)
+}
+
+func (db *DB) rowMutations(def TableDef, record Record, mode writeMode) ([]kv.Mutation, error) {
+	if err := validateFullRecord(def, record); err != nil {
+		return nil, err
 	}
 
 	keyRecord := primaryKeyRecord(def, record)
 	rowKey, err := encodeRowKey(def, keyRecord)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, exists, err := db.kv.Get(rowKey)
+	_, exists, err := db.store.Get(rowKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var old Record
 	if exists {
 		var ok bool
-		old, ok, err = db.Get(tableName, keyRecord)
+		old, ok, err = db.Get(def.Name, keyRecord)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !ok {
-			return ErrRowNotFound
+			return nil, ErrRowNotFound
 		}
 	}
 	switch {
 	case mode == writeInsertOnly && exists:
-		return ErrRowExists
+		return nil, ErrRowExists
 	case mode == writeUpdateOnly && !exists:
-		return ErrRowNotFound
+		return nil, ErrRowNotFound
 	}
 
 	rowValue, err := encodeRowValue(def, record)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mutations := make([]kv.Mutation, 0, 1+len(def.Indexes)*2)
 	if exists {
 		deletes, err := deleteIndexMutations(def, old)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		mutations = append(mutations, deletes...)
 	}
 	mutations = append(mutations, kv.Put(rowKey, rowValue))
 	puts, err := putIndexMutations(def, record)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mutations = append(mutations, puts...)
-	return db.kv.Apply(mutations)
+	return mutations, nil
 }
 
 func (db *DB) mustTable(name string) (TableDef, error) {
@@ -542,7 +586,7 @@ func (db *DB) mustTable(name string) (TableDef, error) {
 }
 
 func (db *DB) nextTablePrefix() (uint32, error) {
-	value, ok, err := db.kv.Get(catalogMetaKey)
+	value, ok, err := db.store.Get(catalogMetaKey)
 	if err != nil {
 		return 0, err
 	}
@@ -564,7 +608,7 @@ func (db *DB) storeNextTablePrefix(next uint32) error {
 	if err != nil {
 		return err
 	}
-	return db.kv.Set(catalogMetaKey, value)
+	return db.store.Apply([]kv.Mutation{kv.Put(catalogMetaKey, value)})
 }
 
 func encodeNextTablePrefix(next uint32) ([]byte, error) {
@@ -973,3 +1017,6 @@ func cloneValue(value Value) Value {
 func cloneBytes(src []byte) []byte {
 	return append([]byte(nil), src...)
 }
+
+// NewTransactional maps catalog, row, and index operations onto one transaction.
+func NewTransactional(store kv.Store) *DB { return &DB{store: store} }

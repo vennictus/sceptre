@@ -7,9 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vennictus/sceptre/internal/btree"
-	"github.com/vennictus/sceptre/internal/freelist"
-	"github.com/vennictus/sceptre/internal/pager"
+	"github.com/vennictus/sceptre/internal/kv"
+	"github.com/vennictus/sceptre/internal/storage"
 )
 
 // CheckIssue describes one consistency problem found in a table database.
@@ -27,8 +26,9 @@ type TableCheck struct {
 
 // CheckReport is the result of a consistency validation pass.
 type CheckReport struct {
-	Tables []TableCheck
-	Issues []CheckIssue
+	Tables  []TableCheck
+	Issues  []CheckIssue
+	Storage storage.CheckReport // engine verification: trees, freelist, page accounting
 }
 
 // OK reports whether the validation pass found no consistency issues.
@@ -41,13 +41,21 @@ func (db *DB) Check() (CheckReport, error) {
 	if db == nil || db.kv == nil {
 		return CheckReport{}, ErrTableNotFound
 	}
+	// Verify storage first: logical checks read through it.
+	storageReport, err := db.kv.Check()
+	if err != nil {
+		if kv.IsCorrupt(err) {
+			return CheckReport{Issues: []CheckIssue{{Code: "storage_invalid", Detail: err.Error()}}}, nil
+		}
+		return CheckReport{}, err
+	}
 
 	defs, err := db.tables()
 	if err != nil {
 		return CheckReport{}, err
 	}
 
-	report := CheckReport{Tables: make([]TableCheck, 0, len(defs))}
+	report := CheckReport{Tables: make([]TableCheck, 0, len(defs)), Storage: storageReport}
 	prefixes := collectPrefixes(defs)
 	expectedIndexKeys := make(map[string]string)
 	seenIndexKeys := make(map[string]struct{})
@@ -86,9 +94,6 @@ func (db *DB) Check() (CheckReport, error) {
 	if err := db.checkRawKeys(defs, prefixes, expectedIndexKeys, seenIndexKeys, &report); err != nil {
 		return CheckReport{}, err
 	}
-	if err := db.checkStoragePages(&report); err != nil {
-		return CheckReport{}, err
-	}
 	for key, detail := range expectedIndexKeys {
 		if _, ok := seenIndexKeys[key]; !ok {
 			report.add("missing_index_entry", detail)
@@ -100,14 +105,15 @@ func (db *DB) Check() (CheckReport, error) {
 
 // Tables returns all persisted table definitions sorted by name.
 func (db *DB) Tables() ([]TableDef, error) {
-	if db == nil || db.kv == nil {
+	if db == nil || db.store == nil {
 		return nil, ErrTableNotFound
 	}
 	return db.tables()
 }
 
 func (db *DB) tables() ([]TableDef, error) {
-	iter := db.kv.Iterator()
+	iter := db.store.ScanIterator()
+	defer iter.Close()
 	if err := iter.SeekGE(catalogTableStart); err != nil {
 		return nil, err
 	}
@@ -137,7 +143,7 @@ func (db *DB) tables() ([]TableDef, error) {
 }
 
 func (db *DB) loadNextTablePrefix() (uint32, bool, error) {
-	value, ok, err := db.kv.Get(catalogMetaKey)
+	value, ok, err := db.store.Get(catalogMetaKey)
 	if err != nil || !ok {
 		return 0, ok, err
 	}
@@ -157,6 +163,7 @@ func (db *DB) checkRows(def TableDef, expectedIndexKeys map[string]string) (int,
 	if err != nil {
 		return 0, nil, err
 	}
+	defer scanner.Close()
 
 	rows := 0
 	for scanner.Valid() {
@@ -190,7 +197,8 @@ func (db *DB) checkRows(def TableDef, expectedIndexKeys map[string]string) (int,
 }
 
 func (db *DB) checkRawKeys(defs []TableDef, prefixes prefixSet, expectedIndexKeys map[string]string, seenIndexKeys map[string]struct{}, report *CheckReport) error {
-	iter := db.kv.Iterator()
+	iter := db.store.ScanIterator()
+	defer iter.Close()
 	if err := iter.SeekFirst(); err != nil {
 		return err
 	}
@@ -220,110 +228,6 @@ func (db *DB) checkRawKeys(defs []TableDef, prefixes prefixSet, expectedIndexKey
 		}
 	}
 	return nil
-}
-
-func (db *DB) checkStoragePages(report *CheckReport) error {
-	p := db.kv.Pager()
-	meta := p.Meta()
-	snapshot := db.kv.Tree().Snapshot()
-	reachable := make(map[uint64]struct{}, len(snapshot.Pages))
-	for pageID := range snapshot.Pages {
-		reachable[pageID] = struct{}{}
-	}
-
-	if snapshot.Root != 0 {
-		if _, ok := snapshot.Pages[snapshot.Root]; !ok {
-			report.add("missing_root_page", fmt.Sprintf("root page %d is not loaded in tree snapshot", snapshot.Root))
-		}
-	}
-	for pageID, page := range snapshot.Pages {
-		if pageID < pager.MetaPageCount || pageID >= meta.PageCount {
-			report.add("tree_page_out_of_range", fmt.Sprintf("tree page %d outside page count %d", pageID, meta.PageCount))
-			continue
-		}
-		checkBTreePage(pageID, page, reachable, report)
-	}
-
-	state, err := freelist.Load(p, meta.FreeListPage)
-	if err != nil {
-		report.add("freelist_invalid", err.Error())
-		return nil
-	}
-	checkPageIDBounds("freelist_head", state.HeadPage, meta.PageCount, report)
-	seenFree := make(map[uint64]string)
-	for _, pageID := range state.PageIDs {
-		checkPageIDBounds("freelist_page", pageID, meta.PageCount, report)
-		if _, ok := reachable[pageID]; ok {
-			report.add("freelist_reachable_overlap", fmt.Sprintf("freelist page %d is reachable from tree root", pageID))
-		}
-		checkDuplicatePage("duplicate_freelist_page", pageID, "freelist page", seenFree, report)
-	}
-	for _, pageID := range state.FreePages {
-		checkPageIDBounds("free_page", pageID, meta.PageCount, report)
-		if _, ok := reachable[pageID]; ok {
-			report.add("free_page_reachable_overlap", fmt.Sprintf("free page %d is reachable from tree root", pageID))
-		}
-		checkDuplicatePage("duplicate_free_page", pageID, "free page", seenFree, report)
-	}
-	return nil
-}
-
-func checkBTreePage(pageID uint64, page []byte, reachable map[uint64]struct{}, report *CheckReport) {
-	node, err := btree.WrapNode(page)
-	if err != nil {
-		report.add("btree_page_invalid", fmt.Sprintf("page %d: %v", pageID, err))
-		return
-	}
-	var previous []byte
-	for i := 0; i < node.Count(); i++ {
-		var key []byte
-		switch node.Type() {
-		case btree.NodeTypeLeaf:
-			cell, err := node.LeafCell(i)
-			if err != nil {
-				report.add("btree_page_invalid", fmt.Sprintf("leaf page %d cell %d: %v", pageID, i, err))
-				continue
-			}
-			key = cell.Key
-		case btree.NodeTypeInternal:
-			cell, err := node.InternalCell(i)
-			if err != nil {
-				report.add("btree_page_invalid", fmt.Sprintf("internal page %d cell %d: %v", pageID, i, err))
-				continue
-			}
-			key = cell.Key
-			if _, ok := reachable[cell.Child]; !ok {
-				report.add("btree_dangling_child", fmt.Sprintf("internal page %d references child %d", pageID, cell.Child))
-			}
-		default:
-			report.add("btree_page_invalid", fmt.Sprintf("page %d has unknown node type %d", pageID, node.Type()))
-			return
-		}
-		if previous != nil && bytes.Compare(previous, key) >= 0 {
-			report.add("btree_key_order", fmt.Sprintf("page %d cell %d key is not strictly increasing", pageID, i))
-		}
-		previous = append(previous[:0], key...)
-	}
-}
-
-func checkPageIDBounds(code string, pageID, pageCount uint64, report *CheckReport) {
-	if pageID == 0 {
-		return
-	}
-	if pageID < pager.MetaPageCount || pageID >= pageCount {
-		report.add(code+"_out_of_range", fmt.Sprintf("page %d outside page count %d", pageID, pageCount))
-	}
-}
-
-func checkDuplicatePage(code string, pageID uint64, label string, seen map[uint64]string, report *CheckReport) {
-	if pageID == 0 {
-		return
-	}
-	if previous, ok := seen[pageID]; ok {
-		report.add(code, fmt.Sprintf("%s %d duplicates %s", label, pageID, previous))
-		return
-	}
-	seen[pageID] = label
 }
 
 func (db *DB) checkIndexEntry(defs []TableDef, ref indexRef, key []byte, expectedIndexKeys map[string]string, seenIndexKeys map[string]struct{}, report *CheckReport) {

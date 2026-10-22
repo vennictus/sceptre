@@ -20,6 +20,10 @@ func Parse(input string) (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseTokens(tokens)
+}
+
+func parseTokens(tokens []token) (Statement, error) {
 	p := &parser{tokens: tokens}
 	stmt, err := p.parseStatement()
 	if err != nil {
@@ -171,12 +175,18 @@ func (p *parser) parseSelect() (Statement, error) {
 		if err != nil {
 			return nil, err
 		}
+		if limit < 0 {
+			return nil, p.errorf("limit must be non-negative")
+		}
 		stmt.Limit = &limit
 	}
 	if p.matchKeyword("offset") {
 		offset, err := p.expectNumber()
 		if err != nil {
 			return nil, err
+		}
+		if offset < 0 {
+			return nil, p.errorf("offset must be non-negative")
 		}
 		stmt.Offset = &offset
 	}

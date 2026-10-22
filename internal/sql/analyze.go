@@ -44,7 +44,7 @@ func AnalyzeSelect(db *table.DB, stmt *SelectStmt) (AnalyzeReport, error) {
 	}
 	plan.Limit = stmt.Limit
 	plan.Offset = stmt.Offset
-	if _, err := selectColumns(def, stmt); err != nil {
+	if _, err := validateSelect(def, stmt); err != nil {
 		return AnalyzeReport{}, err
 	}
 
