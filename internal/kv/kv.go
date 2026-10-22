@@ -60,6 +60,10 @@ func Open(path string, opts Options) (*KV, error) {
 	if err != nil {
 		return nil, err
 	}
+	if v := p.Meta().Version; v != pager.FormatV1 {
+		p.Close()
+		return nil, fmt.Errorf("%w: kv opens format %d files, found %d", pager.ErrUnsupportedVersion, pager.FormatV1, v)
+	}
 
 	tree, err := loadTree(p)
 	if err != nil {

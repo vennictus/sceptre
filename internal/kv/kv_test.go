@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/vennictus/sceptre/internal/pager"
 )
 
 func TestKVSetGetDelAcrossReopen(t *testing.T) {
@@ -530,5 +532,21 @@ func corruptFirstNodeSlotOffset(t *testing.T, path string, pageSize uint32, page
 	}
 	if err := file.Sync(); err != nil {
 		t.Fatalf("Sync() error = %v", err)
+	}
+}
+
+func TestKVRejectsFormatV2Files(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "v2.db")
+	p, err := pager.Open(path, pager.Options{Format: pager.FormatV2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	if store, err := Open(path, Options{}); !errors.Is(err, pager.ErrUnsupportedVersion) {
+		if store != nil {
+			store.Close()
+		}
+		t.Fatalf("Open(v2 file) error = %v", err)
 	}
 }

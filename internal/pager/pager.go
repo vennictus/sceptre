@@ -19,12 +19,16 @@ var (
 	ErrMetaPageSize      = errors.New("pager: meta page size does not match pager")
 	ErrShortPageRead     = errors.New("pager: short page read")
 	ErrCommitUncertain   = errors.New("pager: metadata publication outcome is uncertain; reopen required")
+	ErrInvalidFormat     = errors.New("pager: invalid format version")
 )
 
 // Options controls how the pager initializes a database file.
 type Options struct {
 	PageSize uint32
-	IO       *IOHooks
+	// Format selects the layout of a new file (0 means FormatVersion). An
+	// existing file keeps its own format.
+	Format uint32
+	IO     *IOHooks
 }
 
 // IOHooks provides an optional physical I/O seam for storage-error tests.
@@ -46,6 +50,9 @@ type Pager struct {
 
 // Open opens an existing pager file or initializes a new one.
 func Open(path string, opts Options) (*Pager, error) {
+	if opts.Format != 0 && opts.Format != FormatV1 && opts.Format != FormatV2 {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidFormat, opts.Format)
+	}
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return nil, err
@@ -190,6 +197,7 @@ func (p *Pager) PublishMeta(meta Meta) error {
 	if meta.PageSize != p.pageSize {
 		return ErrMetaPageSize
 	}
+	meta.Version = p.meta.Version
 	meta.Generation = p.meta.Generation + 1
 
 	slot := 1 - p.activeSlot
@@ -216,18 +224,23 @@ func (p *Pager) open(opts Options) error {
 		if pageSize == 0 {
 			pageSize = DefaultPageSize
 		}
-		return p.initialize(pageSize)
+		format := opts.Format
+		if format == 0 {
+			format = FormatVersion
+		}
+		return p.initialize(pageSize, format)
 	}
 
 	return p.load(opts)
 }
 
-func (p *Pager) initialize(pageSize uint32) error {
+func (p *Pager) initialize(pageSize, format uint32) error {
 	if pageSize < uint32(metaHeaderSize) {
 		return ErrInvalidPageSize
 	}
 
 	current := Meta{
+		Version:    format,
 		PageSize:   pageSize,
 		PageCount:  uint64(MetaPageCount),
 		Generation: 1,
