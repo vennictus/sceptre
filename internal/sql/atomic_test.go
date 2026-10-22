@@ -13,7 +13,10 @@ import (
 
 func TestSQLUpdateFailurePreservesAllRowsAndIndexesAcrossReopen(t *testing.T) {
 	t.Parallel()
-	for _, indexed := range []bool{false, true} {
+	// Both rows get the same new body. The first row's index key fits; the
+	// second row's long primary key pushes its index key past the key limit,
+	// so the statement fails after staging part of its rows.
+	for _, indexed := range []bool{true} {
 		t.Run(fmt.Sprintf("indexed=%v", indexed), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "db")
 			db, err := table.Open(path, table.Options{})
@@ -25,7 +28,7 @@ func TestSQLUpdateFailurePreservesAllRowsAndIndexesAcrossReopen(t *testing.T) {
 			if indexed {
 				queries = append(queries, "create index body_idx on t (body)")
 			}
-			queries = append(queries, "insert into t (id,body) values ('a','old-a')", fmt.Sprintf("insert into t (id,body) values ('%s','old-b')", strings.Repeat("z", 1800)))
+			queries = append(queries, "insert into t (id,body) values ('a','old-a')", fmt.Sprintf("insert into t (id,body) values ('%s','old-b')", strings.Repeat("z", 600)))
 			for _, q := range queries {
 				if _, err := Execute(db, q); err != nil {
 					t.Fatal(err)
@@ -35,8 +38,8 @@ func TestSQLUpdateFailurePreservesAllRowsAndIndexesAcrossReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if r, err := Execute(db, fmt.Sprintf("update t set body = '%s'", strings.Repeat("x", 2800))); err == nil || r.RowsAffected != 0 {
-				t.Fatalf("expected oversized-record failure: %+v error=%v", r, err)
+			if r, err := Execute(db, fmt.Sprintf("update t set body = '%s'", strings.Repeat("x", 500))); err == nil || r.RowsAffected != 0 {
+				t.Fatalf("expected oversized index key failure: %+v error=%v", r, err)
 			}
 			assertSQLState(t, db, "t", before)
 			if err := db.Close(); err != nil {
@@ -59,9 +62,49 @@ func TestSQLUpdateFailurePreservesAllRowsAndIndexesAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestSQLLargeValuesSurviveReopen(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "db")
+	db, err := table.Open(path, table.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	body := strings.Repeat("large row body ", 4000) // about 60 KiB, many overflow pages
+	for _, q := range []string{
+		"create table t (id int64, body bytes, primary key (id))",
+		"insert into t (id,body) values (1,'small')",
+		"insert into t (id,body) values (2,'small')",
+		fmt.Sprintf("update t set body = '%s'", body),
+	} {
+		if _, err := Execute(db, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if db, err = table.Open(path, table.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Execute(db, "select body from t")
+	if err != nil || len(r.Rows) != 2 {
+		t.Fatalf("rows=%v error=%v", r.Rows, err)
+	}
+	for _, row := range r.Rows {
+		if string(row[0].Bytes) != body {
+			t.Fatalf("large body came back as %d bytes", len(row[0].Bytes))
+		}
+	}
+	report, err := db.Check()
+	if err != nil || !report.OK() || report.Storage.Data.OverflowPages == 0 {
+		t.Fatalf("check: %+v %v", report, err)
+	}
+}
+
 func TestSQLMultiRowMutationsPublishOneGeneration(t *testing.T) {
 	t.Parallel()
-	store, err := kv.Open(filepath.Join(t.TempDir(), "db"), kv.Options{PageSize: 512})
+	store, err := kv.Open(filepath.Join(t.TempDir(), "db"), kv.Options{PageSize: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +147,7 @@ func TestSQLMultiRowMutationRecoveryAtCommitBoundaries(t *testing.T) {
 		for _, operation := range []string{"update", "delete"} {
 			t.Run(stage+"/"+operation, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "db")
-				db, err := table.Open(path, table.Options{PageSize: 512})
+				db, err := table.Open(path, table.Options{PageSize: 1024})
 				if err != nil {
 					t.Fatal(err)
 				}

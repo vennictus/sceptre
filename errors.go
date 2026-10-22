@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/vennictus/sceptre/internal/btree"
 	"github.com/vennictus/sceptre/internal/pager"
 	"github.com/vennictus/sceptre/internal/sql"
+	"github.com/vennictus/sceptre/internal/storage"
 	"github.com/vennictus/sceptre/internal/table"
 )
 
@@ -59,7 +59,7 @@ func executionError(err error) error {
 		code = CodeCanceled
 	case errors.Is(err, ErrLimit):
 		code = CodeLimit
-	case errors.Is(err, btree.ErrNodeFull), errors.Is(err, btree.ErrSplitFailed):
+	case errors.Is(err, storage.ErrKeyTooLarge), errors.Is(err, storage.ErrValueTooLarge):
 		code = CodeLimit
 	case errors.Is(err, sql.ErrParameter):
 		code = CodeParameter
@@ -69,7 +69,7 @@ func executionError(err error) error {
 		code = CodeConstraint
 	case errors.Is(err, table.ErrRowNotFound), errors.Is(err, table.ErrTableNotFound), errors.Is(err, table.ErrIndexNotFound):
 		code = CodeNotFound
-	case errors.Is(err, ErrInvalidOptions), errors.Is(err, pager.ErrInvalidPageSize), errors.Is(err, btree.ErrInvalidPageSize), errors.Is(err, sql.ErrExec), errors.Is(err, table.ErrInvalidRecord), errors.Is(err, table.ErrInvalidValue), errors.Is(err, table.ErrInvalidTableDef), errors.Is(err, table.ErrInvalidIndexDef):
+	case errors.Is(err, ErrInvalidOptions), errors.Is(err, pager.ErrInvalidPageSize), errors.Is(err, storage.ErrInvalidPageSize), errors.Is(err, storage.ErrUpgradeRequired), errors.Is(err, sql.ErrExec), errors.Is(err, table.ErrInvalidRecord), errors.Is(err, table.ErrInvalidValue), errors.Is(err, table.ErrInvalidTableDef), errors.Is(err, table.ErrInvalidIndexDef):
 		code = CodeInvalid
 	}
 	return &Error{Code: code, Cause: err}

@@ -112,7 +112,7 @@ func TestTransactionSchemaRowsIndexesCommitAndRollback(t *testing.T) {
 
 func TestFailedStatementKeepsTransactionUsable(t *testing.T) {
 	t.Parallel()
-	db, _ := openTestDB(t, Options{PageSize: 512})
+	db, _ := openTestDB(t, Options{PageSize: 1024})
 	execOK(t, db, createPosts)
 	tx, err := db.Begin(background)
 	if err != nil {
@@ -135,8 +135,9 @@ func TestFailedStatementKeepsTransactionUsable(t *testing.T) {
 		_, err := tx.Execute(background, tc.q, tc.args...)
 		assertCode(t, err, tc.code)
 	}
-	// The oversized row fails before pending changes are published.
-	_, err = tx.Execute(background, "update posts set body = ?", Bytes(bytes.Repeat([]byte("x"), 2000)))
+	// Large values fit; an oversized key fails before pending changes are published.
+	txOK(t, tx, "create table tags (name bytes, primary key (name))")
+	_, err = tx.Execute(background, "insert into tags (name) values (?)", Bytes(bytes.Repeat([]byte("x"), 5000)))
 	assertCode(t, err, CodeLimit)
 	r := txOK(t, tx, "select body from posts where id = 1")
 	if string(r.Rows[0][0].Bytes) != "kept" {

@@ -10,7 +10,7 @@ func TestTransactionalIndexedWorkloadAgainstModel(t *testing.T) {
 	t.Parallel()
 	for _, seed := range []int64{7, 42, 2026} {
 		t.Run(strconv.FormatInt(seed, 10), func(t *testing.T) {
-			db, path := openTestDB(t, Options{PageSize: 512})
+			db, path := openTestDB(t, Options{PageSize: 1024})
 			execOK(t, db, createPosts)
 			execOK(t, db, "create index state_idx on posts (state)")
 			model := map[int64]int64{}

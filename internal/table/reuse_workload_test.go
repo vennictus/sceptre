@@ -20,10 +20,10 @@ func TestIndexedWorkloadAcrossPageReuseAndReopen(t *testing.T) {
 	}
 	for _, history := range histories {
 		t.Run(fmt.Sprint(history.Seed), func(t *testing.T) {
-			executed := workloadHistory{Version: 1, Seed: history.Seed, PageSize: 512}
+			executed := workloadHistory{Version: 1, Seed: history.Seed, PageSize: 1024}
 			t.Cleanup(func() { persistFailure(t, &executed) })
 			path := filepath.Join(t.TempDir(), "db")
-			db, err := Open(path, Options{PageSize: 512})
+			db, err := Open(path, Options{PageSize: 1024})
 			if err != nil {
 				t.Fatal(err)
 			}

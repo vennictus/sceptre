@@ -1,2 +1,3 @@
-// Package btree implements Sceptre's copy-on-write B+ tree storage index.
+// Package btree reads the in-memory B+tree layout of format v1 files. It is
+// kept so v1 databases can be upgraded; new files use internal/storage.
 package btree

@@ -20,7 +20,7 @@ func TestUpdateManyStagesRowsAndIndexesBeforeCommitting(t *testing.T) {
 		{"duplicate_key", NewRecord(map[string]Value{"id": Int64Value(1), "body": BytesValue([]byte("other"))}), ErrInvalidRecord},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, err := kv.Open(filepath.Join(t.TempDir(), "db"), kv.Options{PageSize: 512})
+			store, err := kv.Open(filepath.Join(t.TempDir(), "db"), kv.Options{PageSize: 1024})
 			if err != nil {
 				t.Fatal(err)
 			}

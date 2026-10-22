@@ -308,7 +308,7 @@ func TestValidationErrors(t *testing.T) {
 func mustOpenTableDB(t *testing.T, path string) *DB {
 	t.Helper()
 
-	db, err := Open(path, Options{PageSize: 512})
+	db, err := Open(path, Options{PageSize: 1024})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
