@@ -17,6 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Go 1.22 linkers omit LC_UUID from some test binaries, and current
+          # macOS refuses to load them ("dyld: missing LC_UUID"). macOS tests
+          # use current stable Go; Linux and Windows test the go.mod minimum.
+          - os: macos-latest
+            go: stable
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -32,6 +38,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
+          go-version: ${{ matrix.go }} # when set, takes precedence over the file
           go-version-file: go.mod
           cache: false # no dependencies, so no go.sum to key a cache on
 
