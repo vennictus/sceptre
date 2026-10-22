@@ -25,10 +25,33 @@ test outputs, coverage, concrete failing workloads, and generated fuzz failure
 inputs. These jobs run on pull requests, development-branch pushes, and manual
 dispatch. A configured job is not a verified remote result.
 
+## Storage engine validation
+
+```bash
+go test -count=1 ./internal/storage
+go test -race -count=1 ./internal/storage
+go test -count=1 ./internal/storage -run='TestEnv(Fallback|ReaderKeeps|Concurrent|CommitInterrupted|Uncertain|Detects|Sealed)'
+go test -count=1 ./internal/upgrade ./cmd/sceptre -run='Upgrade'
+```
+
+The tree tests compare randomized inserts, replacements, and deletes with a map
+model and, after every commit, verify the full structure, require every live
+page to be reachable (nothing leaked, nothing freed while referenced), and
+require every non-root node to be at least a quarter full. The environment tests
+add file reopens, aborted transactions, a full `Check` with page accounting after
+every commit, readers held across many commits, fallback after an interrupted
+commit plus a destroyed newest meta page, checksum detection, corruption that
+keeps a valid checksum, every commit stage, torn meta writes, and concurrent
+readers. Planting bugs in page reuse, freed-page tracking, or node merging makes
+these tests fail; rerun that experiment when changing those rules.
+
+Upgrade tests convert `internal/upgrade/testdata/v1.db`, a database written by
+the last v1 release of the CLI, and check its rows, index, and storage.
+
 ## Targeted recovery regressions
 
 ```bash
-go test -count=1 ./internal/kv -run='Test(OpenRejects|Fallback|Iterator|PhysicalIO|AbruptProcess)'
+go test -count=1 ./internal/kv -run='Test(KVDetectsCorrupt|Fallback|Iterator|PhysicalIO|AbruptProcess)'
 go test -count=1 ./internal/tx -run='Test(PublishedError|UncertainPublication|ExternalCommit|HistoryRetained)'
 go test -count=1 ./internal/table -run='TestCatalogAndIndexBackfillRemainAtomicOnPhysicalIOFailures'
 go test -count=1 ./internal/sql -run='TestSQL(UpdateFailure|MultiRowMutation)'
@@ -55,7 +78,7 @@ result/request bounds, empty and closed transactions, canceled ownership waits,
 canceled commits, close with open work, and concurrent read-modify-write callers.
 The external-package example compiles and runs without importing internal packages.
 
-The indexed transaction model uses seeds 7, 42, and 2026 at 512-byte pages. Each
+The indexed transaction model uses seeds 7, 42, and 2026 at 1024-byte pages. Each
 seed executes 24 groups of five mutations, checking pending scans and index results
 against a map before commit or rollback. Committed contents and integrity are
 checked after every group, with reopen checkpoints. Failures identify seed/group;
@@ -66,7 +89,7 @@ snapshot isolation or in-flight query cancellation.
 
 ## Randomized workload histories
 
-The indexed workload uses seeds 1, 7, 42, and 2026 at 512-byte pages. Each history
+The indexed workload uses seeds 1, 7, 42, and 2026 at 1024-byte pages. Each history
 contains 300 concrete inserts, upserts, and deletes; checkpoints compare scans,
 point reads, and secondary-index reads with an independent map and run integrity
 checks. Reopen checkpoints repeat the checks against persisted data.
