@@ -1,11 +1,10 @@
 # Performance
 
 The [Go application API](docs/API.md) adds serialized multi-statement transaction
-staging. Its scans build a private view including pending writes, and statement
-validation copies that view before staging changes. The published workload
-baseline measures direct internal table/SQL execution, not this public API's
-additional copying and ownership waits. It establishes no API throughput or
-concurrent-request performance claim.
+staging. Its transactions read an O(1) snapshot and merge pending writes into
+scans. The published workload baseline measures direct internal table/SQL
+execution, not this public API's ownership waits. It establishes no API
+throughput or concurrent-request performance claim.
 
 Sceptre's performance is described through reproducible workloads with durability
 and hardware stated. See [the durable baseline](docs/BENCHMARKS.md) for current
@@ -39,18 +38,20 @@ Interpretation:
 
 ## Why Writes Are Slower Than Reads
 
-Sceptre uses copy-on-write commits:
+Sceptre uses copy-on-write commits on immutable pages:
 
-1. Mutations update a private copy of the in-memory B+ tree.
-2. The full durable tree is remapped, withholding pages needed by both valid meta slots.
-3. Full tree/freelist pages are written.
-4. Data pages are synced.
-5. A new meta page is written and synced, then the committed tree is installed.
+1. A write transaction copies each page it changes and rewrites the path to the
+   root; committed pages are never modified.
+2. The changed pages, the tree directory leaf, and the freelist are written.
+3. Data pages are synced.
+4. A new meta page is written and synced.
 
-Every durable commit has two sync calls and rewrites the tree. The guided demo
-uses `InsertMany` and `DeleteMany` to amortize publication across rows. In the
-recorded 10,000-row, 128-byte-payload workload, an indexed update wrote about
-3.28 MiB per row mutation. Costs grow with the tree, not just the changed row.
+Every durable commit has two sync calls. Its writes grow with the number of
+changed keys times the tree height, plus the freelist, which is rewritten in
+full each commit; they do not grow with the dataset. The guided demo uses
+`InsertMany` and `DeleteMany` to amortize the two syncs across rows. The v1
+engine rewrote the whole tree on every commit; the v1 and v2 rows in
+[the benchmarks](docs/BENCHMARKS.md) show the difference.
 
 ## Benchmarks
 
@@ -74,7 +75,7 @@ How to read them:
 - `PointLookup` should be much faster than a full scan because it uses the
   primary-key path.
 - `SecondaryIndexLookup` reduces candidates but still performs row lookups and
-  decoding. Its resident tree and per-lookup routing costs depend on dataset size.
+  decoding. Per-lookup routing cost grows with tree height.
 - `FullScan` should scale with total row count.
 - Insert benchmarks include durable copy-on-write costs and should not be
   interpreted as append-only throughput.
@@ -83,8 +84,10 @@ How to read them:
 
 | Area | Current Choice | Impact |
 |:--|:--|:--|
-| Commit model | Full-tree copy and root publish | Tree-size-dependent writes and allocations |
-| Page reuse | Freelist with dual-generation retention | Retired pages are reused after protected generations no longer need them |
+| Commit model | Copy-on-write path copying and meta publish | Writes per commit grow with changed keys and tree height, not dataset size |
+| Reads | Snapshots over immutable pages through a bounded cache | Readers never wait for the writer; the database need not fit in memory |
+| Page reuse | Transaction-tagged freelist | Pages are reused once no open snapshot or fallback generation needs them; the freelist is rewritten each commit |
+| Large values | Overflow page chains | Values up to 1 GiB; reading one walks its chain |
 | Query execution | Candidate materialization before filtering | Easy stage reporting, less streaming efficiency |
 | SQL scope | Small supported subset | Easier correctness, less compatibility |
 | Ownership | OS lock on database file | Single owner, automatic release after process exit |

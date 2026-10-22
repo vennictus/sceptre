@@ -6,7 +6,7 @@ Output is JSON on stdout; progress goes to stderr. It never opens an existing
 user database. Its own temporary directories are removed after the run.
 
 These workloads use direct internal table/SQL execution. They do not measure the
-public Go API's transaction-view copying, ownership waits, or concurrent callers.
+public Go API's ownership waits or concurrent callers.
 
 ```bash
 mkdir -p benchmark-results
@@ -49,8 +49,9 @@ and delete/reinsert latency are per operation above, not per individual row.
 Mixed latency percentiles describe the mixture; they are not separate read/write
 percentiles. Use operation counts divisible by five for an exact 80/20 mixture.
 
-Payloads range from zero through 2,048 bytes and fit the current default page.
-Overflow values are not represented. Inputs are capped at 100,000 initial rows,
+Payloads range from zero through 2,048 bytes. With format v2 and 4096-byte
+pages, payloads above about 1,000 bytes are stored in overflow pages, so the
+2,048-byte cases exercise them. Inputs are capped at 100,000 initial rows,
 100,000 measured operations, and 1,000 batch rows to bound the benchmark tool's
 input range. These caps do not imply bounded engine memory or quick large runs.
 
@@ -134,3 +135,67 @@ they do not establish superiority over any other database or production capacity
 The older `go test -bench=. ./internal/table` microbenchmarks remain available.
 Their individual-insert setup and growing datasets differ from this fixed-input
 runner; do not combine their numbers into a comparison without matching methods.
+
+## Format v2 compared with v1: 2026-10-22
+
+The same runner and parameters (rows 100/1,000/10,000, payloads 128 and 2,048
+bytes, 100 operations, batch 32, seed 42) ran twice back to back on the same
+machine as the baseline above: first the v2 engine at revision `491b682`, then
+the v1 engine at revision `33826e4`. Go 1.22.2 on WSL2, databases under `/tmp`
+on ext4, page size 4096, two real syncs per commit, measured clock resolution
+39 ns. Each workload case verified integrity and reopened its database. The
+runs were not isolated from other activity and are single trials, so treat small
+timing differences as noise; physical bytes written do not depend on timing.
+
+At 10,000 initial rows:
+
+| Workload | Payload | v1 p50 ms | v2 p50 ms | v1 MiB written | v2 MiB written | v1 peak heap MiB | v2 peak heap MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| point_read | 128 | 0.007 | 0.008 | 0 | 0 | 3.9 | 5.3 |
+| range_scan | 128 | 0.036 | 0.067 | 0 | 0 | 7.1 | 9.6 |
+| secondary_lookup | 128 | 1.220 | 1.274 | 0 | 0 | 7.7 | 10.4 |
+| sql_limited_scan | 128 | 21.153 | 25.168 | 0 | 0 | 20.1 | 22.9 |
+| single_insert | 128 | 23.483 | 4.003 | 329.44 | 3.15 | 30.7 | 9.5 |
+| batch_insert | 128 | 31.378 | 7.057 | 379.73 | 16.78 | 35.8 | 12.2 |
+| indexed_update | 128 | 22.103 | 4.177 | 328.12 | 3.71 | 27.6 | 8.7 |
+| indexed_delete_insert | 128 | 50.049 | 8.422 | 656.25 | 6.24 | 31.9 | 9.1 |
+| mixed_80_20 (p95) | 128 | 25.801 | 8.279 | 65.62 | 0.75 | 28.8 | 7.2 |
+| point_read | 2048 | 0.009 | 0.018 | 0 | 0 | 42.2 | 43.2 |
+| range_scan | 2048 | 0.291 | 0.215 | 0 | 0 | 80.5 | 81.4 |
+| secondary_lookup | 2048 | 1.986 | 2.367 | 0 | 0 | 84.9 | 83.4 |
+| sql_limited_scan | 2048 | 74.633 | 71.260 | 0 | 0 | 131.9 | 133.6 |
+| single_insert | 2048 | 224.541 | 4.566 | 4034.67 | 3.51 | 335.4 | 52.8 |
+| batch_insert | 2048 | 281.121 | 9.385 | 4664.56 | 28.44 | 418.8 | 102.8 |
+| indexed_update | 2048 | 192.548 | 6.785 | 4015.01 | 4.08 | 323.5 | 54.9 |
+| indexed_delete_insert | 2048 | 391.612 | 8.151 | 8029.29 | 6.60 | 332.0 | 60.1 |
+| mixed_80_20 (p95) | 2048 | 196.942 | 4.562 | 802.96 | 0.82 | 327.5 | 45.5 |
+
+Bytes written per indexed update, 128-byte payload:
+
+| Initial rows | v1 bytes per updated row | v2 bytes per updated row |
+| ---: | ---: | ---: |
+| 100 | 40,960 | 24,945 |
+| 1,000 | 331,776 | 28,385 |
+| 10,000 | 3,440,640 | 38,912 |
+
+What the measurements show:
+
+- **Writes no longer scale with the dataset.** v1 rewrote the whole tree on every
+  commit, so bytes per update grew about 84× from 100 to 10,000 rows. In v2 they
+  grow about 1.6×, with tree height and freelist size. An update writes two
+  root-to-leaf paths (row and index entry share the one data tree), the directory
+  leaf, and the freelist, which v2 rewrites in full on each commit.
+- **Write latency at 10,000 rows fell 4–6× for small rows and 28–49× for 2 KB
+  rows,** where v1 also copied a large in-memory tree.
+- **Files stopped growing under steady updates.** At 10,000 rows and 128 bytes,
+  v1 files grew from 9.1 MB to 10.3 MB across each write workload; v2 files stayed
+  at 4.3 MB, less than half v1's size.
+- **Reads are slower in places.** v1 read pages straight from a resident map; v2
+  reads through a locked page cache and decodes entries as a cursor moves.
+  Primary-key range scans at 128 bytes and point reads of 2 KB values (which now
+  span overflow pages) roughly doubled in latency; most other reads are within
+  noise. LIMIT scans remain dominated by candidate materialization in the SQL
+  executor.
+
+These numbers compare Sceptre with its own earlier engine. They do not establish
+performance relative to any other database.
