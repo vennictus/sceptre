@@ -160,8 +160,11 @@ Inspect reusable pages:
 go run ./cmd/sceptre inspect freelist app.db
 ```
 
-Freelist pages track old pages retired by copy-on-write commits. Those pages can
-be reused by future commits instead of growing the file forever.
+Freelist pages track old pages retired by copy-on-write commits, each tagged
+with the transaction that freed it. A page is reused once no open snapshot and
+no fallback meta generation can still reach it; `reusable_now` shows how many
+qualify. `inspect page` on a free page shows `freed_by_tx`, and on a tree page
+shows `written_by_tx`.
 
 ## 6. Validate Consistency
 
@@ -169,8 +172,19 @@ be reused by future commits instead of growing the file forever.
 go run ./cmd/sceptre check app.db
 ```
 
-The checker validates table rows, secondary-index entries, B+ tree page shape,
-freelist state, page bounds, and storage/catalog consistency.
+The checker first verifies storage: every page's checksum, both B+ trees in
+full, overflow chains, the freelist, and an accounting of every page in the
+file. Then it validates table rows, secondary-index entries, and catalog
+consistency.
+
+If a database was created before format v2, convert it once:
+
+```bash
+go run ./cmd/sceptre upgrade app.db
+```
+
+Upgrade verifies the converted copy before replacing the file and keeps the
+original as `app.db.v1.bak`.
 
 ## 7. Verify Recovery Boundaries
 

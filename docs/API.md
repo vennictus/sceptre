@@ -98,12 +98,12 @@ Use `errors.As(err, &executionError)` with `var executionError *sceptre.Error`.
 
 | Code | Meaning |
 | --- | --- |
-| `parse`, `parameter`, `invalid` | Invalid syntax, bindings, schema/type use, or options |
+| `parse`, `parameter`, `invalid` | Invalid syntax, bindings, schema/type use, or options; a format v1 file that needs `sceptre upgrade` |
 | `constraint`, `not_found` | Duplicate primary key/schema/index, or missing object |
-| `limit` | Request bound or encoded cell capacity exceeded |
+| `limit` | Request bound exceeded, a stored key above the page-size limit (1000 bytes at 4096-byte pages), or a value above 1 GiB |
 | `canceled` | Context canceled or deadline expired before work starts |
 | `closed`, `transaction_closed` | Invalid database or transaction lifecycle |
-| `storage` | Storage/open error; a commit returning this category was definitely aborted |
+| `storage` | Storage/open error, including a page that fails verification; a commit returning this category was definitely aborted |
 | `committed` | Complete commit occurred despite a post-publication error |
 | `uncertain` | Metadata write/sync outcome is uncertain; close and reopen required |
 
