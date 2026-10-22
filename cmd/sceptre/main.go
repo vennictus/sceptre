@@ -1125,6 +1125,11 @@ func printCheckResult(stdout io.Writer, report table.CheckReport) {
 		status = "failed"
 	}
 	fmt.Fprintf(stdout, "status=%s\n", status)
+	if s := report.Storage; s.PageCount > 0 {
+		fmt.Fprintf(stdout, "storage=format v2, generation %d, %d pages\n", s.TxID, s.PageCount)
+		fmt.Fprintf(stdout, "storage_tree=%s\n", s.Data)
+		fmt.Fprintf(stdout, "storage_free=%d free pages in %d freelist pages; every page accounted for\n", s.FreePages, s.FreelistPages)
+	}
 	fmt.Fprintf(stdout, "tables=%d\n", len(report.Tables))
 	for _, table := range report.Tables {
 		fmt.Fprintf(stdout, "table=%s rows=%d indexes=%d\n", table.Name, table.Rows, table.Indexes)
