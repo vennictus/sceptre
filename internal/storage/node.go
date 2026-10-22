@@ -287,11 +287,11 @@ func searchLeaf(page []byte, key []byte) (int, bool, error) {
 	lo, hi := 0, n
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		e, err := leafAt(page, mid, n)
+		k, err := leafKeyAt(page, mid, n)
 		if err != nil {
 			return 0, false, err
 		}
-		switch c := bytes.Compare(e.key, key); {
+		switch c := bytes.Compare(k, key); {
 		case c == 0:
 			return mid, true, nil
 		case c < 0:
@@ -316,15 +316,50 @@ func childIndex(page []byte, key []byte) (int, int, error) {
 	lo, hi := 0, n-1
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		e, err := branchAt(page, mid, n)
+		k, err := branchKeyAt(page, mid, n)
 		if err != nil {
 			return 0, 0, err
 		}
-		if bytes.Compare(e.key, key) < 0 {
+		if bytes.Compare(k, key) < 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
 		}
 	}
 	return lo, n, nil
+}
+
+// leafKeyAt returns key i of a leaf without decoding the rest of the cell.
+// Binary search probes use it; the chosen entry is decoded with leafAt.
+func leafKeyAt(page []byte, i, n int) ([]byte, error) {
+	at, err := cellOffset(page, i, n)
+	if err != nil {
+		return nil, err
+	}
+	if at+leafCellHeader > len(page) {
+		return nil, corrupt("leaf cell %d header out of bounds", i)
+	}
+	keyLen := int(binary.LittleEndian.Uint16(page[at:]))
+	start := at + leafCellHeader
+	if keyLen == 0 || start+keyLen > len(page) {
+		return nil, corrupt("leaf cell %d key out of bounds", i)
+	}
+	return page[start : start+keyLen], nil
+}
+
+// branchKeyAt returns key i of a branch without decoding its child pointer.
+func branchKeyAt(page []byte, i, n int) ([]byte, error) {
+	at, err := cellOffset(page, i, n)
+	if err != nil {
+		return nil, err
+	}
+	if at+branchCellHeader > len(page) {
+		return nil, corrupt("branch cell %d header out of bounds", i)
+	}
+	keyLen := int(binary.LittleEndian.Uint16(page[at+8:]))
+	start := at + branchCellHeader
+	if keyLen == 0 || start+keyLen > len(page) {
+		return nil, corrupt("branch cell %d key out of bounds", i)
+	}
+	return page[start : start+keyLen], nil
 }
