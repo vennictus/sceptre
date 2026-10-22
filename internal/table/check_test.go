@@ -3,41 +3,41 @@ package table
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/vennictus/sceptre/internal/btree"
 )
 
-func TestCheckReportsInvalidDurableRouting(t *testing.T) {
+func TestCheckReportsCorruptStoragePage(t *testing.T) {
 	t.Parallel()
-	db := mustOpenTableDB(t, filepath.Join(t.TempDir(), "db"))
-	defer db.Close()
+	path := filepath.Join(t.TempDir(), "db")
+	db := mustOpenTableDB(t, path)
 	mustCreateUsers(t, db)
 	for i := 1; i <= 100; i++ {
 		mustInsertUser(t, db, int64(i), fmt.Sprintf("user-%d", i), 31)
 	}
-	p := db.kv.Pager()
-	page, err := p.ReadPage(p.Meta().RootPage)
+	root := db.kv.Env().Info().DataRoot
+	pageSize := int64(db.kv.Pager().PageSize())
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := btree.WrapNode(page)
-	if err != nil || n.Type() != btree.NodeTypeInternal {
-		t.Fatalf("fixture root: %v", err)
-	}
-	offset := int(binary.LittleEndian.Uint16(page[8:]))
-	keyLen := int(binary.LittleEndian.Uint16(page[offset+8:]))
-	page[offset+10+keyLen-1] ^= 1
-	if err := p.WritePage(p.Meta().RootPage, page); err != nil {
+	if _, err := f.WriteAt([]byte{0xEE}, int64(root)*pageSize+pageSize/2); err != nil {
 		t.Fatal(err)
 	}
+	f.Close()
+
+	db = mustOpenTableDB(t, path)
+	defer db.Close()
 	report, err := db.Check()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.OK() || !hasIssue(report, "btree_graph_invalid") {
-		t.Fatalf("invalid routing passed check: %+v", report)
+	if report.OK() || !hasIssue(report, "storage_invalid") {
+		t.Fatalf("corrupt page passed check: %+v", report)
 	}
 }
 
@@ -230,7 +230,7 @@ func TestCheckReportsFreelistPageBounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
-	if !hasIssue(report, "freelist_head_out_of_range") && !hasIssue(report, "freelist_invalid") {
+	if !hasIssue(report, "storage_invalid") {
 		t.Fatalf("Check() issues = %+v, want freelist bounds issue", report.Issues)
 	}
 }

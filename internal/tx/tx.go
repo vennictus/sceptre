@@ -4,7 +4,6 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/vennictus/sceptre/internal/btree"
 	"github.com/vennictus/sceptre/internal/kv"
 )
 
@@ -37,7 +36,8 @@ type pendingMutation struct {
 type Tx struct {
 	store    *kv.KV
 	manager  *Manager
-	snapshot *btree.Tree
+	snapshot *kv.Snapshot
+	err      error // set when the snapshot could not be taken
 	version  uint64
 	pending  map[string]pendingMutation
 	reads    map[string]struct{}
@@ -52,7 +52,7 @@ func NewManager(store *kv.KV) *Manager {
 	return &Manager{
 		store:      store,
 		active:     make(map[*Tx]uint64),
-		generation: store.Pager().Meta().Generation,
+		generation: store.Generation(),
 	}
 }
 
@@ -94,11 +94,11 @@ func Begin(store *kv.KV) *Tx {
 }
 
 func beginSnapshot(store *kv.KV) *Tx {
-	snapshot := store.Tree().Snapshot()
-	tree, _ := btree.NewTreeFromSnapshot(int(store.Pager().PageSize()), snapshot)
+	snapshot, err := store.Snapshot()
 	return &Tx{
 		store:    store,
-		snapshot: tree,
+		snapshot: snapshot,
+		err:      err,
 		pending:  make(map[string]pendingMutation),
 		reads:    make(map[string]struct{}),
 		writes:   make(map[string]struct{}),
@@ -186,6 +186,9 @@ func (tx *Tx) ensureOpen() error {
 	if tx == nil || tx.closed || tx.store == nil {
 		return ErrClosed
 	}
+	if tx.err != nil {
+		return tx.err
+	}
 	return tx.store.Err()
 }
 
@@ -219,7 +222,7 @@ func (m *Manager) commit(tx *Tx) error {
 	}
 
 	m.version++
-	m.generation = m.store.Pager().Meta().Generation
+	m.generation = m.store.Generation()
 	m.history = append(m.history, committedTx{
 		version: m.version,
 		writes:  cloneKeySet(tx.writes),
@@ -242,7 +245,7 @@ func (m *Manager) abort(tx *Tx) {
 // Serialized writes outside this manager cannot be attributed to specific keys.
 // Conservatively invalidate older transactions instead of losing conflicts.
 func (m *Manager) observeExternalCommit() {
-	generation := m.store.Pager().Meta().Generation
+	generation := m.store.Generation()
 	if generation == m.generation {
 		return
 	}
@@ -287,6 +290,7 @@ func (tx *Tx) close() {
 	tx.reads = nil
 	tx.writes = nil
 	tx.order = nil
+	tx.snapshot.Release()
 	tx.snapshot = nil
 }
 

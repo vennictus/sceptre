@@ -10,7 +10,7 @@ func TestInspectMetaTreeAndFreeList(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "sceptre.db")
-	store, err := kv.Open(path, kv.Options{PageSize: 512})
+	store, err := kv.Open(path, kv.Options{PageSize: 1024})
 	if err != nil {
 		t.Fatalf("kv.Open() error = %v", err)
 	}
@@ -28,8 +28,8 @@ func TestInspectMetaTreeAndFreeList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InspectMeta() error = %v", err)
 	}
-	if meta.PageSize != 512 {
-		t.Fatalf("PageSize = %d, want 512", meta.PageSize)
+	if meta.PageSize != 1024 {
+		t.Fatalf("PageSize = %d, want 1024", meta.PageSize)
 	}
 	if meta.RootPage == 0 {
 		t.Fatal("RootPage = 0, want non-zero")

@@ -417,8 +417,7 @@ func printDemoPageDetail(stdout io.Writer, info debug.PageDetailInfo, cellLimit 
 		return
 	}
 	fmt.Fprintf(stdout, "cells=%d\n", info.Cells)
-	fmt.Fprintf(stdout, "lower=%d\n", info.Lower)
-	fmt.Fprintf(stdout, "upper=%d\n", info.Upper)
+	fmt.Fprintf(stdout, "written_by_tx=%d\n", info.TxID)
 	fmt.Fprintf(stdout, "free_bytes=%d\n", info.FreeBytes)
 	limit := cellLimit
 	if len(info.BTreeCells) < limit {
@@ -429,7 +428,7 @@ func printDemoPageDetail(stdout io.Writer, info debug.PageDetailInfo, cellLimit 
 			fmt.Fprintf(stdout, "cell=%d child=%d key=%s\n", cell.Index, cell.Child, formatBytes(cell.Key))
 			continue
 		}
-		fmt.Fprintf(stdout, "cell=%d key=%s value=%s\n", cell.Index, formatBytes(cell.Key), formatBytes(cell.Value))
+		fmt.Fprintf(stdout, "cell=%d key=%s value=%s\n", cell.Index, formatBytes(cell.Key), formatCellValue(cell))
 	}
 	if len(info.BTreeCells) > limit {
 		fmt.Fprintf(stdout, "cells_omitted=%d\n", len(info.BTreeCells)-limit)
@@ -798,8 +797,10 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "path=%s\n", info.Path)
+		fmt.Fprintf(stdout, "format_version=%d\n", info.FormatVersion)
 		fmt.Fprintf(stdout, "page_size=%d\n", info.PageSize)
 		fmt.Fprintf(stdout, "root_page=%d\n", info.RootPage)
+		fmt.Fprintf(stdout, "data_root=%d\n", info.DataRoot)
 		fmt.Fprintf(stdout, "freelist_page=%d\n", info.FreeListPage)
 		fmt.Fprintf(stdout, "page_count=%d\n", info.PageCount)
 		fmt.Fprintf(stdout, "generation=%d\n", info.Generation)
@@ -837,6 +838,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "head_page=%d\n", info.HeadPage)
 		fmt.Fprintf(stdout, "freelist_pages=%v\n", info.PageIDs)
 		fmt.Fprintf(stdout, "free_pages=%v\n", info.FreePages)
+		fmt.Fprintf(stdout, "reusable_now=%d\n", info.Reusable)
 		return 0
 	case "schema":
 		if len(args) != 2 {
@@ -980,17 +982,37 @@ func printPageDetail(stdout io.Writer, info debug.PageDetailInfo) {
 
 	if info.Kind == "btree_leaf" || info.Kind == "btree_internal" {
 		fmt.Fprintf(stdout, "cells=%d\n", info.Cells)
-		fmt.Fprintf(stdout, "lower=%d\n", info.Lower)
-		fmt.Fprintf(stdout, "upper=%d\n", info.Upper)
+		fmt.Fprintf(stdout, "written_by_tx=%d\n", info.TxID)
 		fmt.Fprintf(stdout, "free_bytes=%d\n", info.FreeBytes)
 		for _, cell := range info.BTreeCells {
 			if info.Kind == "btree_internal" {
 				fmt.Fprintf(stdout, "cell=%d child=%d key=%s\n", cell.Index, cell.Child, formatBytes(cell.Key))
 				continue
 			}
-			fmt.Fprintf(stdout, "cell=%d key=%s value=%s\n", cell.Index, formatBytes(cell.Key), formatBytes(cell.Value))
+			fmt.Fprintf(stdout, "cell=%d key=%s value=%s\n", cell.Index, formatBytes(cell.Key), formatCellValue(cell))
 		}
+		return
 	}
+
+	switch info.Kind {
+	case "overflow":
+		fmt.Fprintf(stdout, "written_by_tx=%d\n", info.TxID)
+		fmt.Fprintf(stdout, "next_page=%d\n", info.NextPage)
+		fmt.Fprintf(stdout, "data_bytes=%d\n", info.DataBytes)
+	case "free_page":
+		fmt.Fprintf(stdout, "freed_by_tx=%d\n", info.FreedBy)
+	case "directory_leaf", "directory_internal":
+		fmt.Fprintf(stdout, "cells=%d\n", info.Cells)
+		fmt.Fprintf(stdout, "written_by_tx=%d\n", info.TxID)
+	}
+}
+
+// formatCellValue shows an inline value, or where an out-of-line value lives.
+func formatCellValue(cell debug.PageCellInfo) string {
+	if cell.Overflow != 0 {
+		return fmt.Sprintf("<%d bytes in overflow chain from page %d>", cell.ValueSize, cell.Overflow)
+	}
+	return formatBytes(cell.Value)
 }
 
 func printSQLResult(stdout io.Writer, result sql.Result) {

@@ -249,6 +249,7 @@ func operation(db *table.DB, workload string, step, rows, batch, payload int, bo
 		if err != nil {
 			return err
 		}
+		defer scan.Close()
 		seen := 0
 		for scan.Valid() {
 			row, err := scan.Deref()
