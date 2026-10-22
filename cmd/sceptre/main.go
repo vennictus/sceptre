@@ -29,6 +29,7 @@ Usage:
   sceptre explain-analyze <db-path> "<select>"
   sceptre trace <db-path> "<select>"
   sceptre check <db-path>
+  sceptre upgrade <db-path>
   sceptre crash-test <db-path> [--random <n>] [--seed <n>]
   sceptre inspect meta <db-path>
   sceptre inspect tree <db-path>
@@ -66,6 +67,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runTrace(args[1:], stdout, stderr)
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
+	case "upgrade":
+		return runUpgrade(args[1:], stdout, stderr)
 	case "crash-test":
 		return runCrashTest(args[1:], stdout, stderr)
 	case "inspect":
