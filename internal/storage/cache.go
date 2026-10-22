@@ -1,25 +1,37 @@
 package storage
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
-// pageCache holds verified committed pages with CLOCK eviction. Committed
-// pages are immutable, so entries are never invalidated, only replaced when
-// a freed page ID is reused by a later commit.
+// cacheShards splits the page cache so concurrent readers rarely share a lock.
+const cacheShards = 16
+
+// pageCache holds verified committed pages with per-shard CLOCK eviction.
+// Committed pages are immutable, so entries are never invalidated, only
+// replaced when a freed page ID is reused by a later commit. A hit takes only
+// its shard's read lock and sets the slot's reference bit atomically.
 type pageCache struct {
-	mu      sync.Mutex
+	limit  int
+	shards [cacheShards]cacheShard
+}
+
+type cacheShard struct {
+	mu      sync.RWMutex
 	limit   int
-	index   map[uint64]int
-	slots   []cacheSlot
+	index   map[uint64]*cacheSlot
+	slots   []*cacheSlot
 	hand    int
-	hits    uint64
-	misses  uint64
-	evicted uint64
+	hits    atomic.Uint64
+	misses  atomic.Uint64
+	evicted atomic.Uint64
 }
 
 type cacheSlot struct {
 	id   uint64
 	page []byte
-	ref  bool
+	ref  atomic.Bool
 }
 
 // CacheStats reports page cache activity.
@@ -32,52 +44,77 @@ func newPageCache(limit int) *pageCache {
 	if limit < 16 {
 		limit = 16
 	}
-	return &pageCache{limit: limit, index: make(map[uint64]int, limit)}
+	c := &pageCache{limit: limit}
+	per := limit / cacheShards
+	if per < 1 {
+		per = 1
+	}
+	for i := range c.shards {
+		c.shards[i].limit = per
+		c.shards[i].index = make(map[uint64]*cacheSlot, per)
+	}
+	return c
 }
 
+func (c *pageCache) shard(id uint64) *cacheShard { return &c.shards[id&(cacheShards-1)] }
+
 func (c *pageCache) get(id uint64) ([]byte, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	i, ok := c.index[id]
+	sh := c.shard(id)
+	sh.mu.RLock()
+	s, ok := sh.index[id]
+	var page []byte
+	if ok {
+		page = s.page
+		s.ref.Store(true)
+	}
+	sh.mu.RUnlock()
 	if !ok {
-		c.misses++
+		sh.misses.Add(1)
 		return nil, false
 	}
-	c.hits++
-	c.slots[i].ref = true
-	return c.slots[i].page, true
+	sh.hits.Add(1)
+	return page, true
 }
 
 func (c *pageCache) put(id uint64, page []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if i, ok := c.index[id]; ok {
-		c.slots[i] = cacheSlot{id: id, page: page, ref: true}
+	sh := c.shard(id)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if s, ok := sh.index[id]; ok {
+		s.page = page
+		s.ref.Store(true)
 		return
 	}
-	if len(c.slots) < c.limit {
-		c.index[id] = len(c.slots)
-		c.slots = append(c.slots, cacheSlot{id: id, page: page})
+	if len(sh.slots) < sh.limit {
+		s := &cacheSlot{id: id, page: page}
+		sh.index[id] = s
+		sh.slots = append(sh.slots, s)
 		return
 	}
 	for {
-		s := &c.slots[c.hand]
-		if s.ref {
-			s.ref = false
-			c.hand = (c.hand + 1) % len(c.slots)
+		s := sh.slots[sh.hand]
+		sh.hand = (sh.hand + 1) % len(sh.slots)
+		if s.ref.Swap(false) {
 			continue
 		}
-		delete(c.index, s.id)
-		c.evicted++
-		*s = cacheSlot{id: id, page: page}
-		c.index[id] = c.hand
-		c.hand = (c.hand + 1) % len(c.slots)
+		delete(sh.index, s.id)
+		sh.evicted.Add(1)
+		s.id, s.page = id, page
+		sh.index[id] = s
 		return
 	}
 }
 
 func (c *pageCache) stats() CacheStats {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return CacheStats{Pages: len(c.slots), Limit: c.limit, Hits: c.hits, Misses: c.misses, Evicted: c.evicted}
+	st := CacheStats{Limit: c.limit}
+	for i := range c.shards {
+		sh := &c.shards[i]
+		sh.mu.RLock()
+		st.Pages += len(sh.slots)
+		sh.mu.RUnlock()
+		st.Hits += sh.hits.Load()
+		st.Misses += sh.misses.Load()
+		st.Evicted += sh.evicted.Load()
+	}
+	return st
 }
