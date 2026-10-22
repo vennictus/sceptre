@@ -18,6 +18,10 @@ type Cursor struct {
 	root  uint64
 	stack []frame
 	err   error
+
+	// The decoded entry at the current position, so Key and Value decode once.
+	cur   leafEntry
+	curOK bool
 }
 
 func newCursor(src pageSource, l layout, root uint64) *Cursor {
@@ -33,6 +37,7 @@ func (c *Cursor) Valid() bool { return c.err == nil && len(c.stack) > 0 }
 func (c *Cursor) Err() error { return c.err }
 
 func (c *Cursor) fail(err error) error {
+	c.curOK = false
 	c.err = err
 	c.stack = c.stack[:0]
 	return err
@@ -82,6 +87,7 @@ func (c *Cursor) descend(id uint64, last bool) error {
 }
 
 func (c *Cursor) reset() bool {
+	c.curOK = false
 	c.stack = c.stack[:0]
 	return c.err == nil && c.root != 0
 }
@@ -165,6 +171,7 @@ func (c *Cursor) Next() error {
 	if !c.Valid() {
 		return c.err
 	}
+	c.curOK = false
 	for len(c.stack) > 0 {
 		top := &c.stack[len(c.stack)-1]
 		if top.i+1 < top.n {
@@ -188,6 +195,7 @@ func (c *Cursor) Prev() error {
 	if !c.Valid() {
 		return c.err
 	}
+	c.curOK = false
 	for len(c.stack) > 0 {
 		top := &c.stack[len(c.stack)-1]
 		if top.i > 0 {
@@ -213,8 +221,16 @@ func (c *Cursor) entry() (leafEntry, error) {
 		}
 		return leafEntry{}, ErrCursorInvalid
 	}
+	if c.curOK {
+		return c.cur, nil
+	}
 	top := c.stack[len(c.stack)-1]
-	return leafAt(top.page, top.i, top.n)
+	e, err := leafAt(top.page, top.i, top.n)
+	if err != nil {
+		return leafEntry{}, err
+	}
+	c.cur, c.curOK = e, true
+	return e, nil
 }
 
 // Key returns a copy of the current key.
