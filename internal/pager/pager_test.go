@@ -2,6 +2,7 @@ package pager
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -262,5 +263,60 @@ func mustCorruptMetaByte(t *testing.T, p *Pager, slot int, byteOffset int) {
 	}
 	if err := p.file.Sync(); err != nil {
 		t.Fatalf("file.Sync() error = %v", err)
+	}
+}
+
+func TestFormatVersionIsChosenAtCreationAndKept(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, format := range []uint32{FormatV1, FormatV2} {
+		path := filepath.Join(dir, fmt.Sprintf("v%d.db", format))
+		p, err := Open(path, Options{Format: format})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.Meta().Version; got != format {
+			t.Fatalf("new file version = %d, want %d", got, format)
+		}
+		meta := p.Meta()
+		meta.Version = 99 // publication must keep the file's own version
+		if err := p.PublishMeta(meta); err != nil {
+			t.Fatal(err)
+		}
+		p.Close()
+
+		// Reopening ignores a different requested format.
+		other := FormatV1
+		if format == FormatV1 {
+			other = FormatV2
+		}
+		p, err = Open(path, Options{Format: other})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.Meta().Version; got != format {
+			t.Fatalf("reopened version = %d, want %d", got, format)
+		}
+		p.Close()
+	}
+}
+
+func TestOpenRejectsUnknownFormat(t *testing.T) {
+	t.Parallel()
+	if _, err := Open(filepath.Join(t.TempDir(), "db"), Options{Format: 3}); !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("Open(format 3) error = %v", err)
+	}
+}
+
+func TestDecodeMetaRejectsUnknownVersion(t *testing.T) {
+	t.Parallel()
+	page, err := Meta{Version: FormatV2, PageSize: DefaultPageSize}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	putUint32(page[metaVersionOffset:], 7)
+	putUint32(page[metaChecksumOffset:], metaChecksum(page))
+	if _, err := DecodeMeta(page); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("DecodeMeta(version 7) error = %v", err)
 	}
 }
