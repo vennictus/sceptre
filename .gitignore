@@ -11,8 +11,9 @@ coverage.out
 *.coverprofile
 .coverprofile
 
-# Local demo databases
+# Local demo databases (test fixtures are kept)
 *.db
+!**/testdata/*.db
 *.db.lock
 *.crash-*/
 

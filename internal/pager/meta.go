@@ -17,7 +17,7 @@ const (
 	FormatV1 uint32 = 1
 	FormatV2 uint32 = 2
 	// FormatVersion is the format used for new files when none is requested.
-	FormatVersion = FormatV1
+	FormatVersion = FormatV2
 
 	metaMagicSize      = 8
 	metaChecksumOffset = 48
