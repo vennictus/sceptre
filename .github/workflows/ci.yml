@@ -36,7 +36,10 @@ jobs:
           cache: false # no dependencies, so no go.sum to key a cache on
 
       - name: Vet
-        run: go vet ./...
+        run: |
+          # Turn findings into annotations, which are visible without signing in.
+          go vet ./... 2>&1 | sed -E 's/^([^ :]+\.go):([0-9]+):([0-9]+): (.*)$/::error file=\1,line=\2,col=\3::\4/'
+          exit "${PIPESTATUS[0]}"
 
       - name: Test
         run: go test -count=1 -json -covermode=atomic -coverprofile="$RUNNER_TEMP/coverage.out" ./... > "$RUNNER_TEMP/test-results.json"
@@ -48,6 +51,9 @@ jobs:
           results="$RUNNER_TEMP/test-results.json"
           grep '"Action":"fail"' "$results" | grep '"Test":' | sed -E 's/.*"Package":"([^"]*)".*"Test":"([^"]*)".*/::error title=\1::\2 failed/' | head -n 10 || true
           grep -oE '"Output":"[^"]*_test\.go:[0-9]+:[^"]*' "$results" | sed -E 's/^"Output":" *//; s/[\]n$//; s/^/::error::/' | head -n 10 || true
+          # Package-level failures: build errors, panics, and failures outside a named test.
+          grep '"Action":"fail"' "$results" | grep -v '"Test":' | sed -E 's/.*"Package":"([^"]*)".*/::error title=\1::package failed/' | head -n 10 || true
+          grep -oE '"Output":"[^"]*(panic:|\.go:[0-9]+:[0-9]+:|build failed|signal )[^"]*' "$results" | sed -E 's/^"Output":" *//; s/[\]n$//; s/^/::error::/' | head -n 10 || true
 
       - name: Preserve test evidence
         if: always()
