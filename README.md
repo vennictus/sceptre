@@ -1,11 +1,12 @@
 <div align="center">
 
 <pre>
- ____   ____ _____ ____ _____ ____  _____
+ ____   ____ _____ ____ _____ ____  _____ 
 / ___| / ___| ____|  _ \_   _|  _ \| ____|
-\___ \| |   |  _| | |_) || | | |_) |  _|
- ___) | |___| |___|  __/ | | |  _ <| |___
-|____/ \____|_____|_|    |_| |_| \_\_____|
+\___ \| |   |  _| | |_) || | | |_) |  _|  
+ ___) | |___| |___|  __/ | | |  _ <| |___ 
+ |____/ \____|_____|_|    |_| |_| \_\_____| 
+  
 </pre>
 
 **An open-source relational database built in Go**
@@ -42,8 +43,9 @@ Its product direction is a dependable general-purpose database with useful
 query and storage diagnostics. The current supported behavior and limits are
 documented in [the engine contract](docs/ENGINE_CONTRACT.md). The
 [Go API](docs/API.md) supports typed parameters and serialized multi-statement
-transactions. `sceptre serve` runs a local HTTP service with Sceptre Studio, a
-browser workbench; remote network serving is not implemented yet.
+transactions. The CLI includes a built-in interactive shell, and
+`sceptre serve` runs a local HTTP service with Sceptre Studio, a browser
+workbench; remote network serving is not implemented yet.
 
 ---
 
@@ -188,9 +190,9 @@ reliability: consistency check ok; crash recovery ok across 9 cases
 Sceptre intentionally supports a small SQL subset:
 
 ```sql
-CREATE TABLE users (id int64, name bytes, age int64, PRIMARY KEY (id));
+CREATE TABLE users (id int64, name bytes, age int64, city bytes, PRIMARY KEY (id));
 CREATE INDEX users_age ON users (age);
-INSERT INTO users (id, name, age) VALUES (1, 'Ada', 31);
+INSERT INTO users (id, name, age, city) VALUES (1, 'Ada', 31, 'delhi');
 SELECT id, name FROM users WHERE age = 31;
 UPDATE users SET age = 32 WHERE id = 1;
 DELETE FROM users WHERE id = 1;
@@ -308,6 +310,6 @@ commands, consistency checks, tracing, and project documentation.
 
 **Built with Go**
 
-[Back to top](#sceptre)
+[Back to top](#what-is-sceptre)
 
 </div>
