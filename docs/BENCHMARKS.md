@@ -199,3 +199,24 @@ What the measurements show:
 
 These numbers compare Sceptre with its own earlier engine. They do not establish
 performance relative to any other database.
+
+## Engine read path: 2026-10-22
+
+`go test -run '^$' -bench . ./internal/storage` measures warm reads directly on
+the storage engine, without the table or SQL layers: point lookups and 32-entry
+range scans over 10,000 keys with 128- and 2,048-byte values, and point lookups
+from parallel readers (one snapshot per goroutine). Values are median of three
+2-second runs on the WSL2 machine above, 18 threads, Go 1.22.2.
+
+| Benchmark | Before | After | Change |
+| --- | ---: | ---: | --- |
+| Point lookup, 128 B | 575 ns | 475 ns | key-only binary search probes |
+| Point lookup, 2 KB | 1,410 ns | 1,430 ns | within noise; dominated by reading the overflow chain |
+| Range scan of 32, 128 B | 5.6 µs | 4.7 µs | each entry decoded once per position |
+| Range scan of 32, 2 KB | 29 µs | 27 µs | within noise; dominated by copying values |
+| Parallel point lookup, per op | 900 ns | 165 ns | sharded page cache; lock-free snapshot checks |
+
+Before these changes, 18 parallel readers had less total throughput than one
+reader: every page access took one cache mutex and every lookup took the
+environment mutex. Parallel throughput is now about 5.5 times higher. Each
+change was measured on its own; see the commit messages for the steps.
