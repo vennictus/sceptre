@@ -163,6 +163,14 @@ func (e *Env) usable() error {
 	return e.failure
 }
 
+// TxID returns the transaction ID of the latest committed state. Unlike Info it
+// does no other work, so it suits per-transaction callers.
+func (e *Env) TxID() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state.txid
+}
+
 // PageSize returns the file's page size.
 func (e *Env) PageSize() int { return e.l.pageSize }
 
