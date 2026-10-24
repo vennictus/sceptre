@@ -50,7 +50,7 @@ type Pager struct {
 
 // Open opens an existing pager file or initializes a new one.
 func Open(path string, opts Options) (*Pager, error) {
-	if opts.Format != 0 && opts.Format != FormatV1 && opts.Format != FormatV2 {
+	if opts.Format > FormatV3 {
 		return nil, fmt.Errorf("%w: %d", ErrInvalidFormat, opts.Format)
 	}
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
@@ -93,6 +93,16 @@ func acquireOwnership(file *os.File) error {
 			delay *= 2
 		}
 	}
+}
+
+// UpgradeFormat raises the format version written by the next PublishMeta.
+// It only moves forward, from v2 to v3; anything else returns ErrInvalidFormat.
+func (p *Pager) UpgradeFormat(to uint32) error {
+	if p.meta.Version != FormatV2 || to != FormatV3 {
+		return fmt.Errorf("%w: upgrade from %d to %d", ErrInvalidFormat, p.meta.Version, to)
+	}
+	p.meta.Version = to
+	return nil
 }
 
 // Close closes the backing file.
