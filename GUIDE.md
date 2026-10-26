@@ -160,11 +160,14 @@ Inspect reusable pages:
 go run ./cmd/sceptre inspect freelist app.db
 ```
 
-Freelist pages track old pages retired by copy-on-write commits, each tagged
-with the transaction that freed it. A page is reused once no open snapshot and
-no fallback meta generation can still reach it; `reusable_now` shows how many
-qualify. `inspect page` on a free page shows `freed_by_tx`, and on a tree page
-shows `written_by_tx`.
+The free tree tracks old pages retired by copy-on-write commits, each record
+tagged with the transaction that freed it. `inspect freelist` shows the free
+tree root as `head_page` and the pages holding the free tree as
+`freelist_pages`. A page is reused once no open snapshot and no fallback meta
+generation can still reach it; `reusable_now` shows how many qualify. `inspect
+page` on a free page shows `freed_by_tx`, and on a tree page shows
+`written_by_tx`. `inspect pages` labels free tree pages `free_tree_leaf` and
+`free_tree_internal`.
 
 ## 6. Validate Consistency
 
@@ -172,19 +175,21 @@ shows `written_by_tx`.
 go run ./cmd/sceptre check app.db
 ```
 
-The checker first verifies storage: every page's checksum, both B+ trees in
-full, overflow chains, the freelist, and an accounting of every page in the
-file. Then it validates table rows, secondary-index entries, and catalog
-consistency.
+The checker first verifies storage: every page's checksum, the data and free
+B+ trees in full, overflow chains, the free tree against memory, and an
+accounting of every page in the file as exactly one of tree, overflow, free
+tree, or free. Then it validates table rows, secondary-index entries, and
+catalog consistency.
 
-If a database was created before format v2, convert it once:
+Databases created before format v2 must be converted once:
 
 ```bash
 go run ./cmd/sceptre upgrade app.db
 ```
 
 Upgrade verifies the converted copy before replacing the file and keeps the
-original as `app.db.v1.bak`.
+original as `app.db.v1.bak`. The result is format v3. Format v2 files need no
+step: they convert to v3 on their first commit.
 
 ## 7. Verify Recovery Boundaries
 
