@@ -164,8 +164,8 @@ The free tree tracks old pages retired by copy-on-write commits, each record
 tagged with the transaction that freed it. `inspect freelist` shows the free
 tree root as `head_page` and the pages holding the free tree as
 `freelist_pages`. A page is reused once no open snapshot and no fallback meta
-generation can still reach it; `reusable_now` shows how many qualify. `inspect
-page` on a free page shows `freed_by_tx`, and on a tree page shows
+generation can still reach it; `reusable_now` shows how many qualify.
+`inspect page` on a free page shows `freed_by_tx`, and on a tree page shows
 `written_by_tx`. `inspect pages` labels free tree pages `free_tree_leaf` and
 `free_tree_internal`.
 
