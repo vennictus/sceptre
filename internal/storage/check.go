@@ -7,6 +7,7 @@ import (
 
 // CheckReport describes a fully verified committed state.
 type CheckReport struct {
+	Format    uint32 // file format version
 	TxID      uint64
 	PageCount uint64
 	Data      TreeStats
@@ -35,10 +36,11 @@ func (e *Env) Check() (CheckReport, error) {
 	free := e.free // stable: only commits change it, and Check holds the writer slot
 	chain := e.chain
 	head := e.p.Meta().FreeListPage
+	format := e.p.Meta().Version
 	e.mu.Unlock()
 
 	src := e.source(s)
-	rep := CheckReport{TxID: s.txid, PageCount: s.pageCount, FreePages: len(free.pages)}
+	rep := CheckReport{Format: format, TxID: s.txid, PageCount: s.pageCount, FreePages: len(free.pages)}
 	var err error
 	if rep.Directory, err = verifyTree(src, e.l, s.dirRoot); err != nil {
 		return rep, fmt.Errorf("directory: %w", err)
