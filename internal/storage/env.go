@@ -59,13 +59,13 @@ type Env struct {
 	hook    func(string) error
 	writeMu sync.Mutex // one write transaction at a time
 
-	mu        sync.Mutex // guards everything below
-	state     snapshot
-	free      map[uint64]uint64 // committed freelist: page -> freeing txid
-	freePages []uint64          // pages holding the committed freelist
-	readers   map[*ReadTxn]uint64
-	failure   error
-	closed    atomic.Bool // written under mu; read without it on hot paths
+	mu      sync.Mutex // guards everything below
+	state   snapshot
+	free    *freeIndex // committed free pages
+	chain   []uint64   // format v2 only: pages of the freelist chain, freed by the converting commit
+	readers map[*ReadTxn]uint64
+	failure error
+	closed  atomic.Bool // written under mu; read without it on hot paths
 }
 
 // snapshot is one committed state.
@@ -73,17 +73,20 @@ type snapshot struct {
 	txid      uint64
 	dirRoot   uint64 // tree directory root
 	dataRoot  uint64
+	freeRoot  uint64 // free tree root (format v3)
 	pageCount uint64
 }
 
-// Open opens or creates a v2 file. A v1 file returns ErrUpgradeRequired.
+// Open opens or creates a database file. New files use format v3. A v2 file
+// opens normally and converts to v3 with its first commit. A v1 file returns
+// ErrUpgradeRequired.
 func Open(path string, opts Options) (*Env, error) {
 	if opts.PageSize != 0 {
 		if _, err := newLayout(int(opts.PageSize)); err != nil {
 			return nil, err
 		}
 	}
-	p, err := pager.Open(path, pager.Options{PageSize: opts.PageSize, Format: pager.FormatV2, IO: opts.IO})
+	p, err := pager.Open(path, pager.Options{PageSize: opts.PageSize, Format: pager.FormatV3, IO: opts.IO})
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +100,7 @@ func Open(path string, opts Options) (*Env, error) {
 
 func openPager(p *pager.Pager, opts Options) (*Env, error) {
 	meta := p.Meta()
-	if meta.Version != pager.FormatV2 {
+	if meta.Version != pager.FormatV2 && meta.Version != pager.FormatV3 {
 		return nil, ErrUpgradeRequired
 	}
 	l, err := newLayout(int(meta.PageSize))
@@ -117,24 +120,49 @@ func openPager(p *pager.Pager, opts Options) (*Env, error) {
 	}
 	state := snapshot{txid: meta.Generation, dirRoot: meta.RootPage, pageCount: meta.PageCount}
 	src := env.source(state)
-	if state.dirRoot != 0 {
-		v, ok, err := get(src, l, state.dirRoot, dataTree)
+	if state.dataRoot, err = readRoot(src, l, state.dirRoot, dataTree); err != nil {
+		return nil, err
+	}
+	if state.freeRoot, err = readRoot(src, l, state.dirRoot, freeTree); err != nil {
+		return nil, err
+	}
+	if meta.Version == pager.FormatV2 {
+		if state.freeRoot != 0 {
+			return nil, corrupt("format v2 file has a free tree")
+		}
+		free, chain, err := loadFreelist(src, state.pageCount, meta.FreeListPage)
 		if err != nil {
-			return nil, fmt.Errorf("storage: read tree directory: %w", err)
+			return nil, fmt.Errorf("storage: read freelist: %w", err)
 		}
-		if ok {
-			if len(v) != 8 {
-				return nil, corrupt("directory entry for %q has %d bytes", dataTree, len(v))
-			}
-			state.dataRoot = binary.LittleEndian.Uint64(v)
+		env.free, env.chain = legacyFreeIndex(free, l), chain
+	} else {
+		if meta.FreeListPage != 0 {
+			return nil, corrupt("format v3 meta points at a freelist chain page %d", meta.FreeListPage)
+		}
+		if env.free, err = loadFreeIndex(src, l, state.freeRoot, state.pageCount); err != nil {
+			return nil, fmt.Errorf("storage: read free tree: %w", err)
 		}
 	}
-	free, freePages, err := loadFreelist(src, state.pageCount, meta.FreeListPage)
-	if err != nil {
-		return nil, fmt.Errorf("storage: read freelist: %w", err)
-	}
-	env.state, env.free, env.freePages = state, free, freePages
+	env.state = state
 	return env, nil
+}
+
+// readRoot looks up a tree's root page in the directory; 0 means no tree.
+func readRoot(src pageSource, l layout, dirRoot uint64, name []byte) (uint64, error) {
+	if dirRoot == 0 {
+		return 0, nil
+	}
+	v, ok, err := get(src, l, dirRoot, name)
+	if err != nil {
+		return 0, fmt.Errorf("storage: read tree directory: %w", err)
+	}
+	if !ok {
+		return 0, nil
+	}
+	if len(v) != 8 {
+		return 0, corrupt("directory entry for %q has %d bytes", name, len(v))
+	}
+	return binary.LittleEndian.Uint64(v), nil
 }
 
 // Close releases the file. Open transactions fail afterwards.
@@ -276,11 +304,14 @@ type WriteTxn struct {
 	base     snapshot
 	w        *writer
 	root     uint64
-	limit    uint64   // pages freed at or before this txid are reusable
-	pool     []uint64 // reusable committed-free pages, ascending
-	spare    []uint64 // pages this transaction allocated and released
-	consumed map[uint64]bool
-	next     uint64 // next page ID at the end of the file
+	limit    uint64         // pages freed at or before this txid are reusable
+	poolKeys []string       // free records whose pages are reusable, oldest first
+	poolPos  int            // the record being consumed
+	taken    map[string]int // pages consumed from the front of each record
+	consumed []uint64       // every committed-free page this transaction reused
+	spare    []uint64       // pages this transaction allocated and released
+	convert  bool           // format v2 file: this commit writes the free tree and v3 meta
+	next     uint64         // next page ID at the end of the file
 	done     bool
 }
 
@@ -306,16 +337,11 @@ func (e *Env) BeginWrite() (*WriteTxn, error) {
 			limit = s
 		}
 	}
-	var pool []uint64
-	for id, freedBy := range e.free {
-		if freedBy <= limit {
-			pool = append(pool, id)
-		}
-	}
+	poolKeys := e.free.eligible(limit)
+	convert := e.chain != nil
 	e.mu.Unlock()
-	sort.Slice(pool, func(i, j int) bool { return pool[i] > pool[j] }) // pop from the end: lowest first
 
-	t := &WriteTxn{e: e, base: base, root: base.dataRoot, limit: limit, pool: pool, consumed: map[uint64]bool{}, next: base.pageCount}
+	t := &WriteTxn{e: e, base: base, root: base.dataRoot, limit: limit, poolKeys: poolKeys, taken: map[string]int{}, convert: convert, next: base.pageCount}
 	t.w = &writer{
 		src:     e.source(base),
 		l:       e.l,
@@ -332,11 +358,16 @@ func (t *WriteTxn) alloc() (uint64, error) {
 		t.spare = t.spare[:n-1]
 		return id, nil
 	}
-	if n := len(t.pool); n > 0 {
-		id := t.pool[n-1]
-		t.pool = t.pool[:n-1]
-		t.consumed[id] = true
-		return id, nil
+	// Reuse the oldest free records first, so a commit trims few records.
+	for t.poolPos < len(t.poolKeys) {
+		k := t.poolKeys[t.poolPos]
+		rec := t.e.free.recs[k] // stable: only commits change the index, and this txn holds the writer slot
+		if n := t.taken[k]; n < len(rec.pages) {
+			t.taken[k] = n + 1
+			t.consumed = append(t.consumed, rec.pages[n])
+			return rec.pages[n], nil
+		}
+		t.poolPos++
 	}
 	if t.next == math.MaxUint64 {
 		return 0, errors.New("storage: page IDs exhausted")
@@ -422,54 +453,18 @@ func (t *WriteTxn) Commit() error {
 	e := t.e
 	txid := t.base.txid + 1
 
-	// Point the directory at the new data root.
-	dirRoot := t.base.dirRoot
-	var err error
-	if t.root == 0 {
-		dirRoot, _, err = t.w.del(dirRoot, dataTree)
-	} else {
-		var v [8]byte
-		binary.LittleEndian.PutUint64(v[:], t.root)
-		dirRoot, err = t.w.put(dirRoot, dataTree, v[:])
+	if t.convert {
+		// The v2 freelist chain is replaced by the free tree in this commit.
+		e.mu.Lock()
+		t.w.freed = append(t.w.freed, e.chain...)
+		e.mu.Unlock()
 	}
+	// Write the free tree (only what changed) and the directory.
+	dirRoot, freeRoot, edits, err := t.settle(txid)
 	if err != nil {
 		return err
 	}
-
-	// The next freelist: committed entries not reused, pages this commit
-	// replaced, the old freelist's own pages, and pages created then dropped.
-	e.mu.Lock()
-	free := make(map[uint64]uint64, len(e.free)+len(t.w.freed))
-	for id, freedBy := range e.free {
-		if !t.consumed[id] {
-			free[id] = freedBy
-		}
-	}
-	oldFreePages := append([]uint64(nil), e.freePages...)
-	e.mu.Unlock()
-	for _, id := range t.w.freed {
-		free[id] = txid
-	}
-	for _, id := range oldFreePages {
-		free[id] = txid
-	}
-	for _, id := range t.spare {
-		free[id] = 0
-	}
-	t.spare = nil
-	var freePages []uint64
-	for len(freePages) < freelistPagesFor(e.l.pageSize, len(free)) {
-		id, err := t.alloc()
-		if err != nil {
-			return err
-		}
-		delete(free, id)
-		freePages = append(freePages, id)
-	}
-	pages := encodeFreelist(e.l.pageSize, free, freePages)
-	for id, page := range t.w.dirty {
-		pages[id] = page
-	}
+	pages := t.w.dirty
 
 	ids := make([]uint64, 0, len(pages))
 	for id := range pages {
@@ -494,11 +489,13 @@ func (t *WriteTxn) Commit() error {
 
 	meta := e.p.Meta()
 	meta.RootPage = dirRoot
-	meta.FreeListPage = 0
-	if len(freePages) > 0 {
-		meta.FreeListPage = freePages[0]
-	}
+	meta.FreeListPage = 0 // format v3 keeps free pages in the free tree
 	meta.PageCount = t.next
+	if t.convert {
+		if err := e.p.UpgradeFormat(pager.FormatV3); err != nil {
+			return err
+		}
+	}
 	if err := e.p.PublishMeta(meta); err != nil {
 		e.mu.Lock()
 		e.failure = fmt.Errorf("%w: %w", ErrRecoveryRequired, err)
@@ -510,8 +507,9 @@ func (t *WriteTxn) Commit() error {
 		e.cache.put(id, pages[id])
 	}
 	e.mu.Lock()
-	e.state = snapshot{txid: e.p.Meta().Generation, dirRoot: dirRoot, dataRoot: t.root, pageCount: t.next}
-	e.free, e.freePages = free, freePages
+	e.state = snapshot{txid: e.p.Meta().Generation, dirRoot: dirRoot, dataRoot: t.root, freeRoot: freeRoot, pageCount: t.next}
+	e.free.install(edits, t.consumed)
+	e.chain = nil
 	e.mu.Unlock()
 	if err := t.stage(StageMetaPublished); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitCommitted, err)
@@ -533,8 +531,8 @@ type Info struct {
 	PageCount     uint64
 	DirectoryRoot uint64
 	DataRoot      uint64
-	FreePages     int // pages listed in the freelist
-	FreelistPages int // pages holding the freelist
+	FreePages     int // free pages
+	FreelistPages int // format v2 only: pages of the freelist chain awaiting conversion
 	Reusable      int // free pages no reader or fallback state still needs
 	Readers       int
 	OldestReader  uint64 // 0 when there are no readers
@@ -548,7 +546,7 @@ func (e *Env) Info() Info {
 	info := Info{
 		TxID: e.state.txid, PageSize: e.l.pageSize, PageCount: e.state.pageCount,
 		DirectoryRoot: e.state.dirRoot, DataRoot: e.state.dataRoot,
-		FreePages: len(e.free), FreelistPages: len(e.freePages), Readers: len(e.readers),
+		FreePages: len(e.free.pages), FreelistPages: len(e.chain), Readers: len(e.readers),
 		Cache: e.cache.stats(),
 	}
 	limit := uint64(0)
@@ -563,10 +561,6 @@ func (e *Env) Info() Info {
 			limit = s
 		}
 	}
-	for _, freedBy := range e.free {
-		if freedBy <= limit {
-			info.Reusable++
-		}
-	}
+	info.Reusable = e.free.reusable(limit)
 	return info
 }
