@@ -1,4 +1,4 @@
-// Package upgrade converts format v1 database files to format v2.
+// Package upgrade converts format v1 database files to the current format.
 package upgrade
 
 import (
@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	// ErrAlreadyCurrent reports a file that already uses format v2.
-	ErrAlreadyCurrent = errors.New("upgrade: file already uses format v2")
+	// ErrAlreadyCurrent reports a file already in a storage engine format (v2 or
+	// later); v2 files convert themselves to v3 on their first commit.
+	ErrAlreadyCurrent = errors.New("upgrade: file already uses the storage engine format")
 	// ErrLeftover reports files from an earlier upgrade attempt that are in the way.
 	ErrLeftover = errors.New("upgrade: leftover file from an earlier attempt")
 	// ErrMismatch reports that the new file does not hold exactly the old contents.
@@ -36,6 +37,7 @@ type Report struct {
 	Bytes        int64 // key and value bytes copied
 	OldPageSize  uint32
 	NewPageSize  uint32
+	NewFormat    uint32
 	OldPageCount uint64
 	NewPageCount uint64
 	Duration     time.Duration
@@ -115,6 +117,7 @@ func Upgrade(path string) (Report, error) {
 		return Report{}, err
 	}
 	rep.NewPageCount = dst.Info().PageCount
+	rep.NewFormat = dst.Pager().Meta().Version
 
 	if err = dst.Close(); err != nil {
 		return Report{}, err

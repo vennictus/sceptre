@@ -7,7 +7,7 @@ import (
 	"github.com/vennictus/sceptre/internal/upgrade"
 )
 
-// runUpgrade converts a format v1 database to format v2 in place.
+// runUpgrade converts a format v1 database to the current format in place.
 func runUpgrade(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 || args[0] == "" {
 		fmt.Fprint(stderr, "sceptre upgrade: expected <db-path>\n\n")
@@ -20,7 +20,7 @@ func runUpgrade(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "upgraded=%s\n", rep.Path)
-	fmt.Fprintf(stdout, "format=v1->v2\n")
+	fmt.Fprintf(stdout, "format=v1->v%d\n", rep.NewFormat)
 	fmt.Fprintf(stdout, "keys=%d\n", rep.Keys)
 	fmt.Fprintf(stdout, "bytes=%d\n", rep.Bytes)
 	fmt.Fprintf(stdout, "page_size=%d->%d\n", rep.OldPageSize, rep.NewPageSize)

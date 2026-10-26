@@ -28,7 +28,7 @@ func TestRunUpgradeConvertsV1Database(t *testing.T) {
 	if code := run([]string{"upgrade", path}, &stdout, &stderr); code != 0 {
 		t.Fatalf("upgrade exit %d, stderr %q", code, stderr.String())
 	}
-	for _, want := range []string{"format=v1->v2", "keys=", "backup=" + path + ".v1.bak", "verified="} {
+	for _, want := range []string{"format=v1->v3", "keys=", "backup=" + path + ".v1.bak", "verified="} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("upgrade output missing %q:\n%s", want, stdout.String())
 		}
@@ -40,7 +40,7 @@ func TestRunUpgradeConvertsV1Database(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if code := run([]string{"upgrade", path}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "already uses format v2") {
+	if code := run([]string{"upgrade", path}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "already uses the storage engine format") {
 		t.Fatalf("second upgrade: exit %d, stderr %q", code, stderr.String())
 	}
 	if code := run([]string{"upgrade"}, &stdout, &stderr); code != 2 {
