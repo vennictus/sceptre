@@ -595,9 +595,10 @@ func TestEnvDeleteEverythingThenReuse(t *testing.T) {
 	if info := e.Info(); info.DataRoot != 0 {
 		t.Fatalf("empty data tree keeps root %d", info.DataRoot)
 	}
-	rep := mustCheck(t, e)
-	if rep.Directory.Keys != 0 {
-		t.Fatalf("directory still lists the empty data tree: %+v", rep.Directory)
+	mustCheck(t, e)
+	// The directory keeps the free tree (the pages just freed), not the data tree.
+	if root, err := readRoot(e.source(e.state), e.l, e.state.dirRoot, dataTree); err != nil || root != 0 {
+		t.Fatalf("directory still lists the empty data tree: root %d, %v", root, err)
 	}
 	commit(t, e, func(w *WriteTxn) { put(t, w, "again", nil) })
 	commit(t, e, func(w *WriteTxn) { put(t, w, "again2", nil) })
@@ -643,13 +644,18 @@ func TestEnvOpenRejectsSealedBadFreelist(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		commit(t, e, func(w *WriteTxn) { put(t, w, "k", []byte(fmt.Sprint(i))) })
 	}
-	head := e.Freelist().Head
-	if head == 0 {
-		t.Fatal("fixture has no freelist")
+	rep, err := e.Freelist()
+	if err != nil || rep.Head == 0 {
+		t.Fatalf("fixture has no free tree: %+v %v", rep, err)
 	}
 	e.Close()
-	rewritePage(t, path, 1024, head, func(p []byte) {
-		binary.LittleEndian.PutUint64(p[freeEntriesOff:], 1<<40) // far outside the file
+	rewritePage(t, path, 1024, rep.Head, func(p []byte) {
+		entries, err := decodeLeaf(p)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("free tree root is not a leaf with records: %v", err)
+		}
+		v := entries[0].value                              // references the page
+		binary.LittleEndian.PutUint64(v[len(v)-8:], 1<<40) // still ascending, far outside the file
 	})
 	if e, err := Open(path, Options{}); !errors.Is(err, ErrPageCorrupt) {
 		if e != nil {
