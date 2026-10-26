@@ -148,32 +148,42 @@ fail the whole statement with the `limit` category; nothing is truncated.
 
 ## Persistence, recovery, and compatibility
 
-The file layout is format v2:
+The file layout is format v3:
 
 - Two checksummed meta pages hold the format version, page size, tree directory
-  root, freelist head, page count, and generation (the transaction ID).
+  root, freelist head (zero in format v3), page count, and generation (the
+  transaction ID).
 - Every other page starts with a CRC32C checksum, its own page ID, its type, and
   the ID of the transaction that wrote it.
-- The tree directory maps tree names to root pages. One tree, `data`, holds the
-  catalog, rows, and index entries today.
+- The tree directory maps tree names to root pages. Two trees exist: `data`
+  holds the catalog, rows, and index entries, and `free` holds the free tree.
 - Branch and leaf pages form a B+tree whose branch keys equal the largest key in
   each child. Large values live in overflow page chains.
-- The freelist records each free page with the transaction that freed it.
+- The free tree records each free page with the transaction that freed it. Its
+  keys are the freeing transaction ID and a chunk number, both big-endian. Its
+  values are ascending little-endian page IDs, split so each value stays inline
+  in its leaf: up to 124 IDs per record at 4096-byte pages, 28 at 1024.
 
 Committed pages are immutable. A commit copies each page it changes to a new
-page ID and rewrites the path to the root, then writes the directory leaf and
-freelist, syncs, publishes the next meta page, and syncs again. The meta page is
-the visibility point.
+page ID and rewrites the path to the root. It writes the changed data pages, the
+changed free tree records (one for the pages it frees, and trims or deletes the
+records it reuses pages from), and the directory, then syncs, publishes the next
+meta page, and syncs again. The meta page is the visibility point. Editing the
+free tree is itself copy-on-write, so the commit re-applies its free tree and
+directory edits until a round changes nothing. Pages touched once are private to
+the transaction, so this settles in a few rounds, and the number of rounds is
+capped. Free pages are reused oldest freeing transaction first.
 
 Open selects the highest valid meta generation, then verifies the tree directory
-and loads the freelist, rejecting entries that are out of bounds, duplicated, or
-overlap the freelist's own pages. Open does not walk the data tree. Every page is
-verified when it is read from disk: a checksum, page-ID, or type mismatch returns
-a corruption error instead of data, and a snapshot also rejects any page written
-after it. `sceptre check` (table `Check`) verifies the whole state first: both
-trees in full (key order, separators, uniform depth, overflow chains, inline
-storage exactly when a value fits), the on-disk freelist against memory, and an
-accounting in which every page in the file has exactly one owner.
+and loads the free tree into memory, rejecting pages that are out of range or
+listed twice. A v3 meta that points at a freelist chain is rejected. Open does
+not walk the data tree. Every page is verified when it is read from disk: a
+checksum, page-ID, or type mismatch returns a corruption error instead of data,
+and a snapshot also rejects any page written after it. `sceptre check` (table
+`Check`) verifies the whole state first: the data and free trees in full (key
+order, separators, uniform depth, overflow chains, inline storage exactly when a
+value fits), the free tree against memory, and an accounting in which every page
+in the file has exactly one owner: tree, overflow, free tree, or free.
 
 A page freed by transaction T is reused only after T is at or before both the
 previous generation and every open snapshot. So the older meta slot always
@@ -182,13 +192,18 @@ interrupted commit wrote reused pages, open falls back to the previous complete
 state. That fallback can lose the latest acknowledged changes. Checksums detect
 corruption; they do not repair it, and no redundant copy of data pages exists.
 
+Format v2 files (the earlier copy-on-write release) open normally. Their first
+commit converts them to v3 atomically: it frees the old freelist chain pages,
+writes the free tree, and publishes v3 meta in one step, so an interrupted
+conversion leaves a valid v2 file.
+
 Format v1 files (the earlier in-memory engine) return `ErrUpgradeRequired`.
-`sceptre upgrade <db>` converts one: it copies every entry into a temporary v2
-file, verifies it with a full check and a hash comparison of every key and
-value, then renames the original to `<db>.v1.bak` and installs the new file. A
-failure leaves the original in place. Upgrade moves unsupported v1 page sizes,
-such as 512, to 4096. v2 binaries never write v1 files, and there is no
-downgrade.
+`sceptre upgrade <db>` converts one to v3: it copies every entry into a
+temporary v3 file, verifies it with a full check and a hash comparison of every
+key and value, then renames the original to `<db>.v1.bak` and installs the new
+file. A failure leaves the original in place. Upgrade moves unsupported v1 page
+sizes, such as 512, to 4096. Binaries that only know v2 reject v3 files, and
+there is no downgrade.
 
 There is no supported live backup/restore or hot file-copy workflow. Backups,
 restores, and application deployment are not established operational
@@ -207,17 +222,18 @@ guarantees in this version.
 | `internal/tx/tx.go`, `store.go` | Snapshot reads, buffered writes, merged pending scans, conservative conflicts and lifecycle |
 | `internal/sql/parameters.go` | Typed parameter token binding |
 | `internal/kv/kv.go`, `iter.go` | Atomic batches, snapshots and iterators over the storage engine |
-| `internal/storage/` | Copy-on-write B+tree, overflow chains, page checksums, page cache, freelist, readers, commit protocol, full verification and inspection |
-| `internal/upgrade/`, `internal/btree/` | Reading format v1 files and converting them to v2 |
+| `internal/storage/` | Copy-on-write B+tree, overflow chains, page checksums, page cache, free tree, readers, commit protocol, full verification and inspection |
+| `internal/upgrade/`, `internal/btree/` | Reading format v1 files and converting them to v3 |
 | `internal/pager/pager.go`, `meta.go`, `lock_*.go` | File ownership, page reads/writes, sync, dual meta slots and format versions |
 | `internal/table/check.go`, `internal/debug/` | Integrity, inspection and deterministic interruption tooling |
 
 A commit's write cost grows with the number of changed keys times the tree
-height, plus the freelist, which is rewritten in full on each commit and grows
-with the number of free pages. It does not grow with the dataset size. Reads go
+height, plus the free tree records it changes: the pages it frees and the
+records it reuses pages from. That depends mainly on the commit's own page churn
+rather than on the total number of free pages or the dataset size. Reads go
 through a page cache bounded at 64 MiB by default. A write transaction keeps the
 pages it changed in memory until commit, so very large transactions are bounded
-by memory. Open loads the freelist into memory.
+by memory. Open loads the free tree into memory.
 
 ## Evidence and its limits
 
@@ -225,10 +241,13 @@ Storage engine tests compare randomized workloads with a map model under full
 structural verification and page accounting after every commit, including
 reopens and aborted transactions. They cover snapshot isolation, readers held
 across many commits, fallback after an interrupted commit plus a lost meta page,
-checksum detection, corruption that keeps a valid checksum (sealed bad freelist
+checksum detection, corruption that keeps a valid checksum (sealed bad free tree
 entries and separators), every commit failure stage, torn meta writes, and
 concurrent readers under the race detector. Deliberately planted bugs in page
 reuse, freed-page tracking, and node merging are each caught by these tests.
+Tests convert a real v2 file (`internal/storage/testdata/v2.db`), interrupt the
+conversion at every commit stage, and grow and shrink a free tree of thousands
+of pages; planting a one-round settle or skipping record trims makes them fail.
 
 Executable regressions cover row/index statement atomicity, catalog/backfill
 atomicity, short writes, sync errors, post-publication outcomes, metadata
