@@ -19,7 +19,7 @@ const (
 	// FormatV3 stores the freelist as a B+tree (the free tree) instead of a page chain.
 	FormatV3 uint32 = 3
 	// FormatVersion is the format used for new files when none is requested.
-	FormatVersion = FormatV2
+	FormatVersion = FormatV3
 
 	metaMagicSize      = 8
 	metaChecksumOffset = 48
