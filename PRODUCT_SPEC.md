@@ -10,7 +10,7 @@ and limitations.
 
 - Store tables in a single local database file.
 - Keep the engine small enough to understand end to end.
-- Make query planning, execution, storage pages, indexes, freelist state, and
+- Make query planning, execution, storage pages, indexes, free-page state, and
   recovery behavior observable from the CLI.
 - Favor explicit correctness checks over hidden magic.
 
@@ -41,9 +41,9 @@ tables / rows / secondary indexes
 transaction-aware reads / scans / statement staging (Go API)
 atomic key/value batches, snapshots, iterators
 storage engine: copy-on-write B+ tree, overflow chains, page cache,
-  transaction-tagged freelist, snapshot readers, commit protocol
+  transaction-tagged free tree, snapshot readers, commit protocol
 pager / dual meta pages / fsync / file lock
-single database file (format v2)
+single database file (format v3)
 ```
 
 The public Go API owns a serialized execution lease and passes table/SQL execution
@@ -65,45 +65,52 @@ does not prevent unrelated programs from ignoring the lock. Renaming or replacin
 an open database file, network filesystems, and mixed old/new binaries operating
 on the same file are outside the supported ownership contract.
 
-## File Format (v2)
+## File Format (v3)
 
 Sceptre stores fixed-size pages, a power of two from 1024 to 65536 bytes
 (default 4096). The first two pages are meta slots; every other page is a tree,
-overflow, freelist, or free page.
+overflow, free tree, or free page.
 
 Each meta page stores the format version, page size, tree directory root,
-freelist head, page count, generation (the transaction ID), and a checksum. Open
-validates both slots and selects the valid one with the highest generation.
+freelist head (zero in format v3), page count, generation (the transaction ID),
+and a checksum. Open validates both slots and selects the valid one with the
+highest generation.
 
 Every other page starts with a 24-byte header:
 
 | Bytes | Field |
 | --- | --- |
 | 0–3 | CRC32C of the rest of the page |
-| 4 | Page type: branch, leaf, overflow, or freelist |
+| 4 | Page type: branch, leaf, overflow, or freelist (v2 chain pages only) |
 | 5–7 | Reserved |
 | 8–15 | The page's own ID |
 | 16–23 | ID of the transaction that wrote it |
 
-- **Tree directory:** a small B+ tree mapping tree names to root pages. Today it
-  holds one tree, `data`, with the catalog, rows, and index entries; tables and
-  indexes can get their own trees later without another format change.
+- **Tree directory:** a small B+ tree mapping tree names to root pages. It holds
+  two trees: `data`, with the catalog, rows, and index entries, and `free`, the
+  free tree below. Tables and indexes can get their own trees later without
+  another format change.
 - **Branch and leaf pages:** a slot directory followed by cells. A branch key is
   the largest key in its child's subtree. Each entry takes at most a quarter of
   a page, so any overfull node splits into two that fit.
 - **Overflow chains:** values larger than about a quarter page are stored in
   linked overflow pages; the leaf cell keeps the length and first page.
-- **Freelist pages:** a chain of `(page, freeing transaction)` records.
+- **Free tree:** a B+ tree named `free` that records each free page with the
+  transaction that freed it. Keys are the freeing transaction ID and a chunk
+  number, both big-endian. Values are ascending page IDs, split so each value
+  stays inline in its leaf (up to 124 IDs per record at 4096-byte pages).
 
-Open verifies the tree directory and freelist but does not walk the data tree.
-Every page is verified when read from disk (checksum, page ID, type), and a
-snapshot rejects pages written after it, so corruption and page-reuse bugs
-surface as errors rather than wrong data.
+Open verifies the tree directory and loads the free tree into memory, but does
+not walk the data tree. Every page is verified when read from disk (checksum,
+page ID, type), and a snapshot rejects pages written after it, so corruption and
+page-reuse bugs surface as errors rather than wrong data.
 
 Files written by the earlier in-memory engine use format v1. They are rejected
-with `ErrUpgradeRequired` until converted with `sceptre upgrade`, which verifies
-the converted copy before replacing the original and keeps the original as
-`<db>.v1.bak`.
+with `ErrUpgradeRequired` until converted with `sceptre upgrade`, which produces
+format v3, verifies the converted copy before replacing the original, and keeps
+the original as `<db>.v1.bak`. Format v2 files, written by the earlier
+copy-on-write release, keep a chain of `(page, freeing transaction)` freelist
+pages. They open normally, and their first commit converts them to v3 atomically.
 
 ## Commit Protocol
 
@@ -113,10 +120,12 @@ Committed pages are never modified. A write transaction works like this:
    (path copying). Pages it created itself are simply replaced.
 2. Take new page IDs from free pages that are safe to reuse (below), then from
    the end of the file.
-3. On commit, point the tree directory at the new root and build the next
-   freelist: unused free pages, plus every page this commit replaced, tagged
-   with its transaction ID.
-4. Write the changed tree, overflow, directory, and freelist pages, each sealed
+3. On commit, point the tree directory at the new root and update the free tree:
+   record the pages this commit replaced under its transaction ID, and trim or
+   delete the free-tree records it reused pages from. Editing the free tree is
+   itself copy-on-write, so these edits are re-applied until a round changes
+   nothing; this settles in a few rounds and is capped.
+4. Write the changed tree, overflow, free tree, and directory pages, each sealed
    with its checksum, page ID, and transaction ID.
 5. `fsync` the page writes.
 6. Publish the next meta page with a higher generation, then `fsync` it.
@@ -125,14 +134,16 @@ Committed pages are never modified. A write transaction works like this:
 The meta page is the visibility point. If the new meta page is not published,
 reopen selects the previous durable state. If it is published, reopen selects
 the new state. A commit's cost grows with the number of changed keys times the
-tree height, plus the freelist, which is rewritten in full on each commit; it
-does not grow with the dataset size.
+tree height, plus the free tree records it changes: the pages it frees and the
+records it reuses pages from. It depends mainly on the commit's own page churn,
+not on the total number of free pages or the dataset size.
 
 A page freed by transaction T is reused only once T is at or before both the
 previous generation and every open snapshot. Readers therefore never see a page
 change underneath them, and the older meta slot always describes a complete
 state, even after an interrupted commit has written reused pages. Repeated
-updates reuse space after this retention window.
+updates reuse space after this retention window. Free pages are reused oldest
+freeing transaction first.
 
 Data-write and data-sync failures before metadata publication discard the write
 transaction. A short or failed metadata write, or a metadata-sync error, has an
@@ -249,12 +260,12 @@ do not use optimistic conflict detection.
 `sceptre check` first verifies storage, then the relational layer:
 
 - every page read passes its checksum, page-ID, and type checks
-- both trees in full: key order, separators equal to each child's maximum,
-  uniform leaf depth, no page reached twice, well-formed overflow chains, and
-  values stored inline exactly when they fit
-- the freelist on disk matches the in-memory freelist
+- the data and free trees in full: key order, separators equal to each child's
+  maximum, uniform leaf depth, no page reached twice, well-formed overflow
+  chains, and values stored inline exactly when they fit
+- the free tree on disk matches the in-memory free index
 - page accounting: every page in the file is exactly one of tree, overflow,
-  freelist, or free
+  free tree, or free
 - table schemas, row encoding, and table and index prefixes
 - secondary-index entries against their rows, in both directions
 
