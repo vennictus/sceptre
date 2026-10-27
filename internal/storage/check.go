@@ -7,18 +7,23 @@ import (
 
 // CheckReport describes a fully verified committed state.
 type CheckReport struct {
-	TxID          uint64
-	PageCount     uint64
-	Data          TreeStats
-	Directory     TreeStats
-	FreePages     int
+	Format    uint32 // file format version
+	TxID      uint64
+	PageCount uint64
+	Data      TreeStats
+	Directory TreeStats
+	FreeTree  TreeStats // the free tree; empty for a format v2 file not yet converted
+	FreePages int
+	// FreelistPages counts pages holding free-space bookkeeping: the free tree,
+	// or for an unconverted format v2 file, its freelist chain.
 	FreelistPages int
 }
 
-// Check verifies the latest committed state end to end: both trees in full,
-// the on-disk freelist against the in-memory one, and an accounting of every
-// page in the file. Each page must be exactly one of tree, overflow,
-// freelist, or free. It holds the writer slot; readers continue.
+// Check verifies the latest committed state end to end: all trees in full,
+// the on-disk free pages against the in-memory index, and an accounting of
+// every page in the file. Each page must be exactly one of tree, overflow,
+// free tree, freelist chain, or free. It holds the writer slot; readers
+// continue.
 func (e *Env) Check() (CheckReport, error) {
 	e.writeMu.Lock()
 	defer e.writeMu.Unlock()
@@ -28,13 +33,14 @@ func (e *Env) Check() (CheckReport, error) {
 		return CheckReport{}, err
 	}
 	s := e.state
-	free := e.free
-	freePages := e.freePages
+	free := e.free // stable: only commits change it, and Check holds the writer slot
+	chain := e.chain
 	head := e.p.Meta().FreeListPage
+	format := e.p.Meta().Version
 	e.mu.Unlock()
 
 	src := e.source(s)
-	rep := CheckReport{TxID: s.txid, PageCount: s.pageCount, FreePages: len(free), FreelistPages: len(freePages)}
+	rep := CheckReport{Format: format, TxID: s.txid, PageCount: s.pageCount, FreePages: len(free.pages)}
 	var err error
 	if rep.Directory, err = verifyTree(src, e.l, s.dirRoot); err != nil {
 		return rep, fmt.Errorf("directory: %w", err)
@@ -42,21 +48,42 @@ func (e *Env) Check() (CheckReport, error) {
 	if rep.Data, err = verifyTree(src, e.l, s.dataRoot); err != nil {
 		return rep, fmt.Errorf("data tree: %w", err)
 	}
-	if s.dataRoot != 0 && rep.Directory.Keys != 1 {
-		return rep, corrupt("directory holds %d trees, want 1", rep.Directory.Keys)
+	if rep.FreeTree, err = verifyTree(src, e.l, s.freeRoot); err != nil {
+		return rep, fmt.Errorf("free tree: %w", err)
+	}
+	trees := 0
+	for _, root := range []uint64{s.dataRoot, s.freeRoot} {
+		if root != 0 {
+			trees++
+		}
+	}
+	if rep.Directory.Keys != trees {
+		return rep, corrupt("directory holds %d trees, want %d", rep.Directory.Keys, trees)
 	}
 
-	onDisk, diskPages, err := loadFreelist(src, s.pageCount, head)
-	if err != nil {
-		return rep, fmt.Errorf("freelist: %w", err)
-	}
-	if len(onDisk) != len(free) || len(diskPages) != len(freePages) {
-		return rep, corrupt("freelist on disk has %d entries in %d pages, memory %d in %d", len(onDisk), len(diskPages), len(free), len(freePages))
-	}
-	for id, freedBy := range free {
-		if got, ok := onDisk[id]; !ok || got != freedBy {
-			return rep, corrupt("freelist entry for page %d differs between disk and memory", id)
+	// The free pages on disk must match the in-memory index exactly.
+	var onDisk *freeIndex
+	if chain != nil {
+		pages, diskChain, err := loadFreelist(src, s.pageCount, head)
+		if err != nil {
+			return rep, fmt.Errorf("freelist: %w", err)
 		}
+		if len(diskChain) != len(chain) {
+			return rep, corrupt("freelist chain on disk has %d pages, memory %d", len(diskChain), len(chain))
+		}
+		onDisk = legacyFreeIndex(pages, e.l)
+		rep.FreelistPages = len(chain)
+	} else {
+		if head != 0 {
+			return rep, corrupt("format v3 meta points at a freelist chain page %d", head)
+		}
+		if onDisk, err = loadFreeIndex(src, e.l, s.freeRoot, s.pageCount); err != nil {
+			return rep, fmt.Errorf("free tree: %w", err)
+		}
+		rep.FreelistPages = len(rep.FreeTree.Pages)
+	}
+	if !onDisk.equal(free) {
+		return rep, corrupt("free pages on disk (%d) differ from memory (%d)", len(onDisk.pages), len(free.pages))
 	}
 
 	owner := make(map[uint64]string, s.pageCount)
@@ -73,19 +100,19 @@ func (e *Env) Check() (CheckReport, error) {
 	for _, tree := range []struct {
 		name string
 		st   TreeStats
-	}{{"directory", rep.Directory}, {"data", rep.Data}} {
+	}{{"directory", rep.Directory}, {"data", rep.Data}, {"free tree", rep.FreeTree}} {
 		for id, t := range tree.st.Pages {
 			if err := claim(id, tree.name+" "+t.String()); err != nil {
 				return rep, err
 			}
 		}
 	}
-	for _, id := range freePages {
-		if err := claim(id, "freelist"); err != nil {
+	for _, id := range chain {
+		if err := claim(id, "freelist chain"); err != nil {
 			return rep, err
 		}
 	}
-	for id := range free {
+	for id := range free.pages {
 		if err := claim(id, "free"); err != nil {
 			return rep, err
 		}

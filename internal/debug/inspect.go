@@ -100,13 +100,19 @@ type PageDetailInfo struct {
 func pageKind(r storage.PageReport, freelistHead uint64) string {
 	switch r.Kind {
 	case storage.KindLeaf:
-		if r.Tree == storage.TreeDirectory {
+		switch r.Tree {
+		case storage.TreeDirectory:
 			return "directory_leaf"
+		case storage.TreeFree:
+			return "free_tree_leaf"
 		}
 		return "btree_leaf"
 	case storage.KindBranch:
-		if r.Tree == storage.TreeDirectory {
+		switch r.Tree {
+		case storage.TreeDirectory:
 			return "directory_internal"
+		case storage.TreeFree:
+			return "free_tree_internal"
 		}
 		return "btree_internal"
 	case storage.KindFreelist:
@@ -327,7 +333,10 @@ func InspectFreeList(path string) (FreeListInfo, error) {
 		return FreeListInfo{}, err
 	}
 	defer store.Close()
-	rep := store.Env().Freelist()
+	rep, err := store.Env().Freelist()
+	if err != nil {
+		return FreeListInfo{}, err
+	}
 	info := FreeListInfo{HeadPage: rep.Head, PageIDs: rep.Pages, Reusable: rep.Reusable}
 	for _, e := range rep.Entries {
 		info.FreePages = append(info.FreePages, e.Page)

@@ -91,7 +91,7 @@ func (kv *KV) Env() *storage.Env { return kv.env }
 func (kv *KV) Pager() *pager.Pager { return kv.env.Pager() }
 
 // Generation returns the transaction ID of the latest committed state.
-func (kv *KV) Generation() uint64 { return kv.env.Info().TxID }
+func (kv *KV) Generation() uint64 { return kv.env.TxID() }
 
 // Get looks up a key in the latest committed state.
 func (kv *KV) Get(key []byte) ([]byte, bool, error) {

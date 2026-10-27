@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+
+	"github.com/vennictus/sceptre/internal/pager"
 )
 
 // benchEnv returns an environment holding n keys with payload-byte values,
@@ -120,4 +124,57 @@ func BenchmarkParallelPointGet(b *testing.B) {
 			i++
 		}
 	})
+}
+
+// BenchmarkSmallCommitWithManyFreePages measures a one-key commit in a file
+// holding thousands of free pages, reporting bytes written per commit. With
+// the freelist stored as a chain, every commit rewrote the whole list.
+func BenchmarkSmallCommitWithManyFreePages(b *testing.B) {
+	var written atomic.Int64
+	hooks := &pager.IOHooks{WriteAt: func(f *os.File, p []byte, off int64) (int, error) {
+		written.Add(int64(len(p)))
+		return f.WriteAt(p, off)
+	}}
+	e, err := Open(filepath.Join(b.TempDir(), "db"), Options{IO: hooks})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer e.Close()
+	value := bytes.Repeat([]byte("v"), 600)
+	commitAll := func(apply func(w *WriteTxn) error) {
+		w, err := e.BeginWrite()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := apply(w); err != nil {
+			b.Fatal(err)
+		}
+		if err := w.Commit(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	commitAll(func(w *WriteTxn) error {
+		for i := 0; i < 20000; i++ {
+			if err := w.Put(benchKey(i), value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	commitAll(func(w *WriteTxn) error { // frees thousands of pages
+		for i := 0; i < 15000; i++ {
+			if _, err := w.Delete(benchKey(i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	free := e.Info().FreePages
+	written.Store(0)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		commitAll(func(w *WriteTxn) error { return w.Put(benchKey(20000+i%100), value) })
+	}
+	b.ReportMetric(float64(written.Load())/float64(b.N), "B-written/op")
+	b.ReportMetric(float64(free), "free-pages")
 }

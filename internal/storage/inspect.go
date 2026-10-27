@@ -23,6 +23,7 @@ const (
 const (
 	TreeData      = "data"
 	TreeDirectory = "directory"
+	TreeFree      = "free"
 )
 
 // PageReport describes one physical page of the latest committed state.
@@ -74,7 +75,7 @@ type inspection struct {
 	src       snapshotSource
 	activeSlt int
 	owner     map[uint64]PageReport
-	freePages []uint64
+	chain     []uint64
 	free      map[uint64]uint64
 }
 
@@ -86,14 +87,14 @@ func (e *Env) inspect() (inspection, error) {
 		e.mu.Unlock()
 		return inspection{}, err
 	}
-	in := inspection{s: e.state, freePages: e.freePages, free: e.free, activeSlt: e.p.ActiveMetaSlot()}
+	in := inspection{s: e.state, chain: e.chain, free: e.free.pages, activeSlt: e.p.ActiveMetaSlot()}
 	e.mu.Unlock()
 	in.src = e.source(in.s)
 	in.owner = make(map[uint64]PageReport, in.s.pageCount)
 	for _, tree := range []struct {
 		name string
 		root uint64
-	}{{TreeDirectory, in.s.dirRoot}, {TreeData, in.s.dataRoot}} {
+	}{{TreeDirectory, in.s.dirRoot}, {TreeData, in.s.dataRoot}, {TreeFree, in.s.freeRoot}} {
 		st, err := verifyTree(in.src, e.l, tree.root)
 		if err != nil {
 			return inspection{}, fmt.Errorf("%s tree: %w", tree.name, err)
@@ -109,7 +110,7 @@ func (e *Env) inspect() (inspection, error) {
 			in.owner[id] = PageReport{ID: id, Kind: kind, Tree: tree.name}
 		}
 	}
-	for _, id := range in.freePages {
+	for _, id := range in.chain {
 		in.owner[id] = PageReport{ID: id, Kind: KindFreelist}
 	}
 	for id, freedBy := range in.free {
@@ -204,18 +205,27 @@ func (e *Env) InspectPage(id uint64) (PageDetail, error) {
 	return e.describe(in, id)
 }
 
-// Freelist describes the committed freelist.
-func (e *Env) Freelist() FreelistReport {
-	info := e.Info()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	rep := FreelistReport{Pages: append([]uint64(nil), e.freePages...), Reusable: info.Reusable}
-	if len(rep.Pages) > 0 {
-		rep.Head = rep.Pages[0]
+// Freelist describes the committed free pages. Head is the free tree root
+// (format v3) or the freelist chain head (format v2 awaiting conversion), and
+// Pages are the pages holding that bookkeeping.
+func (e *Env) Freelist() (FreelistReport, error) {
+	in, err := e.inspect()
+	if err != nil {
+		return FreelistReport{}, err
 	}
-	for id, freedBy := range e.free {
+	rep := FreelistReport{Reusable: e.Info().Reusable, Head: in.s.freeRoot}
+	if in.chain != nil {
+		rep.Head = in.chain[0]
+	}
+	for id, r := range in.owner {
+		if r.Tree == TreeFree || r.Kind == KindFreelist {
+			rep.Pages = append(rep.Pages, id)
+		}
+	}
+	sort.Slice(rep.Pages, func(i, j int) bool { return rep.Pages[i] < rep.Pages[j] })
+	for id, freedBy := range in.free {
 		rep.Entries = append(rep.Entries, FreeEntry{Page: id, FreedBy: freedBy})
 	}
 	sort.Slice(rep.Entries, func(i, j int) bool { return rep.Entries[i].Page < rep.Entries[j].Page })
-	return rep
+	return rep, nil
 }

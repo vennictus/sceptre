@@ -42,16 +42,20 @@ Sceptre uses copy-on-write commits on immutable pages:
 
 1. A write transaction copies each page it changes and rewrites the path to the
    root; committed pages are never modified.
-2. The changed pages, the tree directory leaf, and the freelist are written.
+2. The changed data pages, the changed free tree records, and the tree directory
+   leaf are written.
 3. Data pages are synced.
 4. A new meta page is written and synced.
 
 Every durable commit has two sync calls. Its writes grow with the number of
-changed keys times the tree height, plus the freelist, which is rewritten in
-full each commit; they do not grow with the dataset. The guided demo uses
-`InsertMany` and `DeleteMany` to amortize the two syncs across rows. The v1
-engine rewrote the whole tree on every commit; the v1 and v2 rows in
-[the benchmarks](docs/BENCHMARKS.md) show the difference.
+changed keys times the tree height, plus the free tree records it changes: the
+pages it frees and the records it reuses pages from. Those depend on the
+commit's own page churn rather than on the total number of free pages, and they
+do not grow with the dataset. The guided demo uses `InsertMany` and `DeleteMany`
+to amortize the two syncs across rows. The v1 engine rewrote the whole tree on
+every commit; the v1 and v2 rows in [the benchmarks](docs/BENCHMARKS.md) show
+the difference. Format v3 replaced the v2 freelist chain with the free tree; the
+free tree section there measures the smaller per-commit writes that followed.
 
 ## Benchmarks
 
@@ -86,7 +90,7 @@ How to read them:
 |:--|:--|:--|
 | Commit model | Copy-on-write path copying and meta publish | Writes per commit grow with changed keys and tree height, not dataset size |
 | Reads | Snapshots over immutable pages through a bounded cache | Readers never wait for the writer; the database need not fit in memory |
-| Page reuse | Transaction-tagged freelist | Pages are reused once no open snapshot or fallback generation needs them; the freelist is rewritten each commit |
+| Page reuse | Transaction-tagged free tree | Pages are reused oldest freeing transaction first, once no open snapshot or fallback generation needs them; each commit edits only the free tree records it changes |
 | Large values | Overflow page chains | Values up to 1 GiB; reading one walks its chain |
 | Query execution | Candidate materialization before filtering | Easy stage reporting, less streaming efficiency |
 | SQL scope | Small supported subset | Easier correctness, less compatibility |
