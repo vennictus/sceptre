@@ -50,8 +50,10 @@ type Options struct {
 }
 
 // DB owns a database file. All public operations are safe for concurrent calls.
-// One transaction at a time owns the execution path, including read operations.
-// A DB must be created with Open and must not be copied after use.
+// Write transactions own the execution path one at a time. Reads (SELECT
+// through Execute, Tables, Explain, and ReadTx) run on snapshots alongside
+// them and each other. A DB must be created with Open and must not be copied
+// after use.
 type DB struct {
 	mu      sync.Mutex
 	store   *kv.KV
