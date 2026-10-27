@@ -42,8 +42,9 @@ inspection, and tested recovery boundaries.
 Its product direction is a dependable general-purpose database with useful
 query and storage diagnostics. The current supported behavior and limits are
 documented in [the engine contract](docs/ENGINE_CONTRACT.md). The
-[Go API](docs/API.md) supports typed parameters and serialized multi-statement
-transactions. The CLI includes a built-in interactive shell, and
+[Go API](docs/API.md) supports typed parameters, serialized multi-statement
+transactions, and read-only snapshots through `DB.BeginRead`: writes are
+serialized, and reads run concurrently on snapshots. The CLI includes a built-in interactive shell, and
 `sceptre serve` runs a local HTTP service with Sceptre Studio, a browser
 workbench; remote network serving is not implemented yet.
 
@@ -241,7 +242,7 @@ The detailed supported boundaries are in [PRODUCT_SPEC.md](PRODUCT_SPEC.md).
 
 ```text
 sceptre/
-├── sceptre.go           # Public Go API and serialized SQL transactions
+├── sceptre.go           # Public Go API: serialized writes, snapshot reads
 ├── cmd/sceptre          # CLI entry point, terminal formatting, serve command
 ├── cmd/sceptre-bench    # Durable workload measurement runner
 ├── docs                # Engine contracts, validation, measured baselines
@@ -266,7 +267,7 @@ sceptre/
 | **[GUIDE.md](GUIDE.md)** | Hands-on walkthrough of the CLI, demo, inspection, tracing, and recovery tools |
 | **[PRODUCT_SPEC.md](PRODUCT_SPEC.md)** | Technical design, storage model, transaction scope, file format, and recovery protocol |
 | **[Engine contract](docs/ENGINE_CONTRACT.md)** | Supported guarantees, concurrency and compatibility limits, and implementation map |
-| **[Go API](docs/API.md)** | Typed SQL parameters, multi-statement transactions, lifecycle, bounds, and stable errors |
+| **[Go API](docs/API.md)** | Typed SQL parameters, multi-statement transactions, read-only snapshots, lifecycle, bounds, and stable errors |
 | **[Local service](docs/SERVICE.md)** | `sceptre serve` HTTP API, Studio, security model, transactions, and limits |
 | **[Validation](docs/VALIDATION.md)** | Regression, race, coverage, fuzz, and saved-workload replay commands |
 | **[Benchmarks](docs/BENCHMARKS.md)** | Reproducible durable workload methodology and measured baseline |
