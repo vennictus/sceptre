@@ -131,9 +131,20 @@ func (db *DB) Close() error {
 	return executionError(db.store.Close())
 }
 
-// Execute runs one statement in an automatic transaction. On commit failure,
-// inspect Error.Code: committed and uncertain outcomes require different handling.
+// Execute runs one statement in an automatic transaction. A SELECT reads the
+// latest committed state on a snapshot and never waits for an open write
+// transaction. Other statements wait for exclusive execution. On commit
+// failure, inspect Error.Code: committed and uncertain outcomes require
+// different handling.
 func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result, error) {
+	if isSelect(input, args) {
+		r, err := db.BeginRead(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		defer r.Close()
+		return r.Execute(ctx, input, args...)
+	}
 	t, err := db.Begin(ctx)
 	if err != nil {
 		return Result{}, err
@@ -146,22 +157,38 @@ func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result,
 	return result, t.Commit(ctx)
 }
 
+// isSelect reports whether input is a SELECT, parsing with its bindings as
+// execution does. Statements that fail to parse take the write path, which
+// reports the same error.
+func isSelect(input string, args []Value) bool {
+	stmt, err := sql.ParseParameters(input, args)
+	if err != nil {
+		return false
+	}
+	_, ok := stmt.(*sql.SelectStmt)
+	return ok
+}
+
+// Tables lists table definitions from the latest committed state, without
+// waiting for an open write transaction.
 func (db *DB) Tables(ctx context.Context) ([]TableDef, error) {
-	t, err := db.Begin(ctx)
+	r, err := db.BeginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer t.Rollback()
-	return t.Tables(ctx)
+	defer r.Close()
+	return r.Tables(ctx)
 }
 
+// Explain plans a statement against the latest committed state, without
+// waiting for an open write transaction.
 func (db *DB) Explain(ctx context.Context, input string, args ...Value) (Plan, error) {
-	t, err := db.Begin(ctx)
+	r, err := db.BeginRead(ctx)
 	if err != nil {
 		return Plan{}, err
 	}
-	defer t.Rollback()
-	return t.Explain(ctx, input, args...)
+	defer r.Close()
+	return r.Explain(ctx, input, args...)
 }
 
 func (db *DB) Check(ctx context.Context) (CheckReport, error) {

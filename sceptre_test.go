@@ -206,9 +206,14 @@ func TestExecutionOwnershipCancellationAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	txOK(t, tx, "insert into posts (id, body, state) values (1, 'not committed', 0)")
+	// Reads run on a snapshot: they do not wait, and see only committed rows.
+	if r := execOK(t, db, "select * from posts"); len(r.Rows) != 0 {
+		t.Fatalf("read saw an uncommitted row: %v", r.Rows)
+	}
+	// Writes wait for exclusive execution until their context ends.
 	ctx, cancel := context.WithTimeout(background, 30*time.Millisecond)
 	defer cancel()
-	_, err = db.Execute(ctx, "select * from posts")
+	_, err = db.Execute(ctx, "insert into posts (id, body, state) values (2, 'waits', 0)")
 	assertCode(t, err, CodeCanceled)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
