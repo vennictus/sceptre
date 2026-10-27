@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -389,5 +391,42 @@ func TestStaticAssets(t *testing.T) {
 	f.h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "http://"+testHost+"/", nil))
 	if rec.Code != 405 {
 		t.Errorf("POST to asset: %d", rec.Code)
+	}
+}
+
+func TestConcurrentReadsDuringATransaction(t *testing.T) {
+	f := newFixture(t, Options{TransactionTTL: time.Minute})
+	f.mustSQL("CREATE TABLE items (id int64, PRIMARY KEY (id))")
+	f.mustSQL("INSERT INTO items (id) VALUES (1)")
+	id := f.begin()
+	f.sql("/api/tx/execute", "INSERT INTO items (id) VALUES (2)", withTx(id))
+
+	var wg sync.WaitGroup
+	failures := make(chan string, 64)
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				body, _ := json.Marshal(query{SQL: "SELECT id FROM items"})
+				req := httptest.NewRequest(http.MethodPost, "http://"+testHost+"/api/execute", strings.NewReader(string(body)))
+				req.Header.Set("Authorization", "Bearer "+testToken)
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				f.h.ServeHTTP(rec, req)
+				if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"rows":[[{"type":"int64","value":"1"}]]`) {
+					failures <- fmt.Sprintf("%d %s", rec.Code, rec.Body.String())
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(failures)
+	for msg := range failures {
+		t.Fatalf("concurrent read: %s", msg)
+	}
+	if r := f.call("/api/tx/commit", "{}", withTx(id)); r.Status != 200 {
+		t.Fatalf("commit after concurrent reads: %d %+v", r.Status, r.Body.Error)
 	}
 }
