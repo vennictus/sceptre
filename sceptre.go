@@ -60,6 +60,7 @@ type DB struct {
 	active  *Tx
 	closed  bool
 	maxRows int
+	reads   sync.WaitGroup // read operations in flight; Close waits for them
 }
 
 // Open acquires exclusive file ownership and recovers the latest valid state.
@@ -116,7 +117,8 @@ func (db *DB) Begin(ctx context.Context) (*Tx, error) {
 }
 
 // Close aborts an open transaction, wakes waiting requests, and releases the file.
-// It waits for any currently executing operation to finish. Repeated Close is safe.
+// It waits for any currently executing operation, including reads on
+// snapshots, to finish; later operations fail with closed. Repeated Close is safe.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -128,7 +130,21 @@ func (db *DB) Close() error {
 	if db.active != nil {
 		db.active.finish()
 	}
+	// Read operations never take db.mu while running, so waiting here is safe,
+	// and new ones block on db.mu until they can see closed.
+	db.reads.Wait()
 	return executionError(db.store.Close())
+}
+
+// enterRead registers a read operation, failing once the database is closed.
+func (db *DB) enterRead() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed {
+		return ErrClosed
+	}
+	db.reads.Add(1)
+	return nil
 }
 
 // Execute runs one statement in an automatic transaction. A SELECT reads the

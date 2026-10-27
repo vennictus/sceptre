@@ -63,6 +63,10 @@ func (r *ReadTx) Execute(ctx context.Context, input string, args ...Value) (Resu
 	if err := r.ready(ctx); err != nil {
 		return Result{}, executionError(err)
 	}
+	if err := r.db.enterRead(); err != nil {
+		return Result{}, executionError(err)
+	}
+	defer r.db.reads.Done()
 	stmt, err := r.db.statement(input, args)
 	if err != nil {
 		return Result{}, executionError(err)
@@ -81,6 +85,10 @@ func (r *ReadTx) Explain(ctx context.Context, input string, args ...Value) (Plan
 	if err := r.ready(ctx); err != nil {
 		return Plan{}, executionError(err)
 	}
+	if err := r.db.enterRead(); err != nil {
+		return Plan{}, executionError(err)
+	}
+	defer r.db.reads.Done()
 	stmt, err := r.db.statement(input, args)
 	if err != nil {
 		return Plan{}, executionError(err)
@@ -96,6 +104,10 @@ func (r *ReadTx) Tables(ctx context.Context) ([]TableDef, error) {
 	if err := r.ready(ctx); err != nil {
 		return nil, executionError(err)
 	}
+	if err := r.db.enterRead(); err != nil {
+		return nil, executionError(err)
+	}
+	defer r.db.reads.Done()
 	defs, err := r.tables.Tables()
 	return defs, executionError(err)
 }
