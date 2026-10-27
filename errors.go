@@ -26,6 +26,7 @@ const (
 	CodeStorage           Code = "storage"
 	CodeCommitted         Code = "committed"
 	CodeUncertain         Code = "uncertain"
+	CodeReadOnly          Code = "read_only"
 )
 
 // Error preserves its underlying error for errors.Is and errors.As.
@@ -49,6 +50,8 @@ func executionError(err error) error {
 	switch {
 	case errors.Is(err, ErrRecoveryRequired):
 		code = CodeUncertain
+	case errors.Is(err, ErrReadOnly):
+		code = CodeReadOnly
 	case errors.Is(err, ErrCommitCommitted):
 		code = CodeCommitted
 	case errors.Is(err, ErrClosed):

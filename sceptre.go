@@ -38,6 +38,8 @@ var (
 	ErrLimit            = errors.New("sceptre: request limit exceeded")
 	ErrCommitCommitted  = kv.ErrCommitCommitted
 	ErrRecoveryRequired = kv.ErrRecoveryRequired
+	// ErrReadOnly reports a write statement in a read-only transaction.
+	ErrReadOnly = kv.ErrReadOnly
 )
 
 // Options controls opening and the maximum SELECT rows returned per request.
