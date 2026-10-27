@@ -2,6 +2,7 @@ package sceptre
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -127,4 +128,91 @@ func TestCloseWaitsForInFlightReads(t *testing.T) {
 	assertCode(t, err, CodeClosed)
 	_, err = db.BeginRead(background)
 	assertCode(t, err, CodeClosed)
+}
+
+// A writer moves balance between accounts in multi-statement transactions
+// while readers scan every account. Each read must see a whole committed
+// state: the total never changes, and no reader waits for the writer.
+func TestConcurrentReadsSeeOnlyWholeCommits(t *testing.T) {
+	t.Parallel()
+	db, _ := openTestDB(t, Options{})
+	execOK(t, db, "create table accounts (id int64, balance int64, primary key (id))")
+	const accounts, start = 10, 100
+	for i := 0; i < accounts; i++ {
+		execOK(t, db, "insert into accounts (id, balance) values (?, ?)", Int64(int64(i)), Int64(start))
+	}
+	total := func(rows [][]Value) int64 {
+		var sum int64
+		for _, r := range rows {
+			sum += r[0].I64
+		}
+		return sum
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	reads := make([]int, 4)
+	for g := range reads {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				res, err := db.Execute(background, "select balance from accounts")
+				if err != nil {
+					errs <- err
+					return
+				}
+				if len(res.Rows) != accounts || total(res.Rows) != accounts*start {
+					errs <- fmt.Errorf("read saw %d rows totalling %d", len(res.Rows), total(res.Rows))
+					return
+				}
+				reads[g]++
+			}
+		}(g)
+	}
+
+	for i := 0; i < 100; i++ {
+		tx, err := db.Begin(background)
+		if err != nil {
+			t.Fatal(err)
+		}
+		from, to := int64(i%accounts), int64((i+3)%accounts)
+		// Between these statements the database is mid-transfer; readers must not see it.
+		txOK(t, tx, "update accounts set balance = ? where id = ?", Int64(start-7), Int64(from))
+		txOK(t, tx, "update accounts set balance = ? where id = ?", Int64(start+7), Int64(to))
+		if i%2 == 0 {
+			if err := tx.Commit(background); err != nil {
+				t.Fatal(err)
+			}
+			// Restore so every committed state keeps the same total.
+			tx, err = db.Begin(background)
+			if err != nil {
+				t.Fatal(err)
+			}
+			txOK(t, tx, "update accounts set balance = ? where id = ?", Int64(start), Int64(from))
+			txOK(t, tx, "update accounts set balance = ? where id = ?", Int64(start), Int64(to))
+			if err := tx.Commit(background); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	for g, n := range reads {
+		if n == 0 {
+			t.Fatalf("reader %d never completed a read while the writer ran", g)
+		}
+	}
 }
