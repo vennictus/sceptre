@@ -46,8 +46,9 @@ pager / dual meta pages / fsync / file lock
 single database file (format v3)
 ```
 
-The public Go API owns a serialized execution lease and passes table/SQL execution
-through `internal/tx`. CLI operations continue to use direct statement commits.
+The public Go API serializes writes and transactions with an execution lease,
+runs reads on snapshots, and passes table/SQL execution through `internal/tx`.
+CLI operations continue to use direct statement commits.
 The [application API guide](docs/API.md) defines the public lifecycle and errors.
 
 ## File Ownership
@@ -232,10 +233,13 @@ power-loss behavior.
 - optimistic conflict detection
 
 The public Go API exposes Begin/Commit/Rollback and integrates schema, row, and
-index operations with these primitives. One transaction owns execution at a time,
-including reads, so public requests execute in serial order. Failed statements
-preserve prior pending work; Commit ends the transaction on every outcome. Close
-aborts open work. SQL transaction statements remain unsupported.
+index operations with these primitives. One transaction owns write execution at a
+time. Reads run concurrently: SELECT through `DB.Execute`, `DB.Tables`, and
+`DB.Explain`, and `DB.BeginRead` (a read-only transaction on one committed
+snapshot), never wait for the write transaction and never see its pending
+changes. Failed statements preserve prior pending work; Commit ends the
+transaction on every outcome. Close aborts open work and waits for in-flight
+reads. SQL transaction statements remain unsupported.
 
 Typed positional `?` parameters bind int64 or arbitrary bytes as literal tokens.
 The API caps SELECT results to MaxRows (default 1000), SQL text to 65536 bytes,
