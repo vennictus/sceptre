@@ -205,7 +205,8 @@ func (t *Tx) ready(ctx context.Context) error {
 	return t.db.store.Err()
 }
 
-func (t *Tx) statement(input string, args []Value) (sql.Statement, error) {
+// statement parses one statement with the request bounds and caps SELECT output.
+func (db *DB) statement(input string, args []Value) (sql.Statement, error) {
 	if len(input) > 65536 || len(args) > 256 {
 		return nil, ErrLimit
 	}
@@ -214,8 +215,8 @@ func (t *Tx) statement(input string, args []Value) (sql.Statement, error) {
 		return nil, err
 	}
 	if s, ok := stmt.(*sql.SelectStmt); ok {
-		if s.Limit == nil || *s.Limit > int64(t.db.maxRows) {
-			n := int64(t.db.maxRows)
+		if s.Limit == nil || *s.Limit > int64(db.maxRows) {
+			n := int64(db.maxRows)
 			s.Limit = &n
 		}
 	}
@@ -230,7 +231,7 @@ func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, 
 	if err := t.ready(ctx); err != nil {
 		return Result{}, executionError(err)
 	}
-	stmt, err := t.statement(input, args)
+	stmt, err := t.db.statement(input, args)
 	if err != nil {
 		return Result{}, executionError(err)
 	}
@@ -254,7 +255,7 @@ func (t *Tx) Explain(ctx context.Context, input string, args ...Value) (Plan, er
 	if err := t.ready(ctx); err != nil {
 		return Plan{}, executionError(err)
 	}
-	stmt, err := t.statement(input, args)
+	stmt, err := t.db.statement(input, args)
 	if err != nil {
 		return Plan{}, executionError(err)
 	}
