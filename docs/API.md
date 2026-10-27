@@ -14,11 +14,14 @@ result, err := db.Execute(ctx,
     sceptre.Int64(1))
 ```
 
-`Execute` runs one statement in an automatic transaction. `Tables` returns
-schemas and indexes; `Explain` uses the same typed parameter binding and planning
-path as execution. `Check` validates the committed database. Returned data is
-materialized and does not retain an execution lease. The compiled example in
-[`example_test.go`](../example_test.go) creates a schema and performs real writes.
+`Execute` runs one statement in an automatic transaction. A SELECT is the
+exception: it runs on a snapshot of the latest committed state and never waits
+for an open transaction. `Tables` returns schemas and indexes, and `Explain`
+uses the same typed parameter binding and planning path as execution; both also
+read committed snapshots. `Check` validates the committed database. Returned
+data is materialized and does not retain an execution lease. The compiled
+example in [`example_test.go`](../example_test.go) creates a schema and performs
+real writes.
 
 ## Multi-statement transactions
 
@@ -53,17 +56,44 @@ definitely aborted storage errors. Start a new transaction if retry is appropria
 Repeated rollback is safe; execution and repeated commit after completion return
 `transaction_closed`.
 
-One transaction at a time owns a DB's execution path, including read-only
-transactions. Public methods coordinate concurrent callers. This provides
-serializable execution through this API by serialization, rather than concurrent
-snapshot isolation. Call `tx.Execute`, `tx.Tables`, and `tx.Explain` while holding
-that transaction: calling `db` operations waits for ownership, including ownership
-held by the same caller. Always defer rollback after a successful Begin.
+One transaction at a time owns a DB's write execution path. Public methods
+coordinate concurrent callers. Writes and transactions are serialized; reads are
+not (see [Read-only snapshots](#read-only-snapshots)). Call `tx.Execute`,
+`tx.Tables`, and `tx.Explain` while holding that transaction: calling `db.Begin`,
+`db.Check`, or a write through `db.Execute` waits for ownership, including
+ownership held by the same caller. A SELECT through `db.Execute`, `db.Tables`,
+and `db.Explain` does not wait. Always defer rollback after a successful Begin.
 
-`Close` waits for an executing operation, aborts an open transaction, wakes waiting
-requests, and releases file ownership. An abandoned transaction otherwise retains
-ownership until explicitly finished or the DB closes. There is no automatic expiry.
-The raw internal packages still require caller serialization.
+`Close` waits for executing operations, including snapshot reads, aborts an open
+transaction, wakes waiting requests, and releases file ownership. Operations
+after Close, including on a still-open ReadTx, fail with `closed`. An abandoned
+transaction otherwise retains ownership until explicitly finished or the DB
+closes. There is no automatic expiry. The raw internal packages still require
+caller serialization.
+
+## Read-only snapshots
+
+```go
+rt, err := db.BeginRead(ctx)
+if err != nil { return err }
+defer rt.Close()
+
+result, err := rt.Execute(ctx,
+    "select body from posts where id = ?",
+    sceptre.Int64(1))
+```
+
+`BeginRead` pins one committed snapshot. Its `Execute` accepts only SELECT;
+other statements fail with `read_only` and leave the ReadTx usable. `Explain`
+and `Tables` read the same snapshot. A ReadTx never waits for the write
+transaction or other readers, sees nothing committed after it began, and never
+sees pending changes. `IsQuery(input, args...)` reports whether a statement only
+reads, parsed with its bindings as `Execute` parses it; input that does not
+parse is not a query.
+
+An open ReadTx keeps the pages of its snapshot from being reused, so close it
+promptly: a long-lived ReadTx makes the file grow. Calls on one ReadTx run one
+at a time, and its methods are safe for concurrent calls. Repeated Close is safe.
 
 ## Typed bindings and bounds
 
@@ -103,6 +133,7 @@ Use `errors.As(err, &executionError)` with `var executionError *sceptre.Error`.
 | `limit` | Request bound exceeded, a stored key above the page-size limit (1000 bytes at 4096-byte pages), or a value above 1 GiB |
 | `canceled` | Context canceled or deadline expired before work starts |
 | `closed`, `transaction_closed` | Invalid database or transaction lifecycle |
+| `read_only` | A write statement in a read-only transaction (`ReadTx.Execute`) |
 | `storage` | Storage/open error, including a page that fails verification; a commit returning this category was definitely aborted |
 | `committed` | Complete commit occurred despite a post-publication error |
 | `uncertain` | Metadata write/sync outcome is uncertain; close and reopen required |
