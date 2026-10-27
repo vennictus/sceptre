@@ -16,8 +16,10 @@ const (
 	// the disk-based copy-on-write engine. Both share this meta page encoding.
 	FormatV1 uint32 = 1
 	FormatV2 uint32 = 2
+	// FormatV3 stores the freelist as a B+tree (the free tree) instead of a page chain.
+	FormatV3 uint32 = 3
 	// FormatVersion is the format used for new files when none is requested.
-	FormatVersion = FormatV2
+	FormatVersion = FormatV3
 
 	metaMagicSize      = 8
 	metaChecksumOffset = 48
@@ -81,7 +83,7 @@ func DecodeMeta(page []byte) (Meta, error) {
 	}
 
 	version := binary.LittleEndian.Uint32(page[metaVersionOffset:])
-	if version != FormatV1 && version != FormatV2 {
+	if version != FormatV1 && version != FormatV2 && version != FormatV3 {
 		return Meta{}, fmt.Errorf("%w: %d", ErrUnsupportedVersion, version)
 	}
 

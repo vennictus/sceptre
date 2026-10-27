@@ -60,8 +60,9 @@ input range. These caps do not imply bounded engine memory or quick large runs.
 - p50/p95/p99 use nearest rank over individually timed operations. The mean is
   also recorded. A run with 100 samples has a coarse tail estimate; repeat runs
   before making comparative claims.
-- Physical bytes count actual successful WriteAt bytes, including tree, freelist,
-  and full metadata pages. Sync calls invoke the real file sync. Each successful
+- Physical bytes count actual successful WriteAt bytes, including tree, free-page
+  bookkeeping (a freelist chain in v2, the free tree in v3), and full metadata
+  pages. Sync calls invoke the real file sync. Each successful
   commit performs a data sync and metadata sync.
 - Application mutation bytes count inserted/updated id + bucket + payload
   (16 + payload bytes), and an 8-byte id for deletion. Write amplification divides
@@ -184,7 +185,10 @@ What the measurements show:
   commit, so bytes per update grew about 84× from 100 to 10,000 rows. In v2 they
   grow about 1.6×, with tree height and freelist size. An update writes two
   root-to-leaf paths (row and index entry share the one data tree), the directory
-  leaf, and the freelist, which v2 rewrites in full on each commit.
+  leaf, and the freelist, which v2 rewrites in full on each commit. Format v3
+  replaced that chain with the free tree rather than rewriting history: each
+  commit writes only the free tree records it changes (see the free tree section
+  below). The v2 figures above are kept as recorded.
 - **Write latency at 10,000 rows fell 4–6× for small rows and 28–49× for 2 KB
   rows,** where v1 also copied a large in-memory tree.
 - **Files stopped growing under steady updates.** At 10,000 rows and 128 bytes,
@@ -199,3 +203,44 @@ What the measurements show:
 
 These numbers compare Sceptre with its own earlier engine. They do not establish
 performance relative to any other database.
+
+## Engine read path: 2026-10-22
+
+`go test -run '^$' -bench . ./internal/storage` measures warm reads directly on
+the storage engine, without the table or SQL layers: point lookups and 32-entry
+range scans over 10,000 keys with 128- and 2,048-byte values, and point lookups
+from parallel readers (one snapshot per goroutine). Values are median of three
+2-second runs on the WSL2 machine above, 18 threads, Go 1.22.2.
+
+| Benchmark | Before | After | Change |
+| --- | ---: | ---: | --- |
+| Point lookup, 128 B | 575 ns | 475 ns | key-only binary search probes |
+| Point lookup, 2 KB | 1,410 ns | 1,430 ns | within noise; dominated by reading the overflow chain |
+| Range scan of 32, 128 B | 5.6 µs | 4.7 µs | each entry decoded once per position |
+| Range scan of 32, 2 KB | 29 µs | 27 µs | within noise; dominated by copying values |
+| Parallel point lookup, per op | 900 ns | 165 ns | sharded page cache; lock-free snapshot checks |
+
+Before these changes, 18 parallel readers had less total throughput than one
+reader: every page access took one cache mutex and every lookup took the
+environment mutex. Parallel throughput is now about 5.5 times higher. Each
+change was measured on its own; see the commit messages for the steps.
+
+## Free tree: 2026-10-26
+
+`go test -run '^$' -bench SmallCommitWithManyFreePages -benchtime 200x ./internal/storage`
+measures one-key commits on a database with thousands of free pages: 20,000
+rows of 600 bytes are inserted, then 15,000 are deleted, with 4096-byte pages.
+Values are the median of three runs of 200 commits each, on the WSL2 machine
+above with Go 1.22.2. Each commit makes two real syncs.
+
+| Free-page store | Bytes written per commit | Latency per commit |
+| --- | ---: | ---: |
+| Freelist chain (revision `59e30cb`) | 104,346 | about 5.0 ms |
+| Free tree (format v3) | 33,608 | about 3.3 ms |
+
+The free tree writes 3.1 times fewer bytes per commit. The chain rewrote every
+free-page record on each commit; the free tree writes only the records this
+commit changes. The remaining bytes are the changed data path, the directory
+leaf, and the free tree records. This is one benchmark on one shared development
+machine, so treat the latency figures as an observation rather than a
+throughput claim.

@@ -468,8 +468,8 @@ func TestKVReusesFreedPagesAcrossCommits(t *testing.T) {
 	if counts[3] != counts[4] || counts[4] != counts[5] {
 		t.Fatalf("page count did not stabilize after reuse: %v", counts)
 	}
-	if store.Pager().Meta().FreeListPage == 0 {
-		t.Fatal("FreeListPage = 0 after repeated updates, want non-zero")
+	if store.Env().Info().FreePages == 0 {
+		t.Fatal("no free pages after repeated updates, want retired pages in the free tree")
 	}
 }
 

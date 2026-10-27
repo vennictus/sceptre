@@ -303,8 +303,86 @@ func TestFormatVersionIsChosenAtCreationAndKept(t *testing.T) {
 
 func TestOpenRejectsUnknownFormat(t *testing.T) {
 	t.Parallel()
-	if _, err := Open(filepath.Join(t.TempDir(), "db"), Options{Format: 3}); !errors.Is(err, ErrInvalidFormat) {
-		t.Fatalf("Open(format 3) error = %v", err)
+	if _, err := Open(filepath.Join(t.TempDir(), "db"), Options{Format: 4}); !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("Open(format 4) error = %v", err)
+	}
+}
+
+func TestFormatV3FileReopensAsV3(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "v3.db")
+	p, err := Open(path, Options{Format: FormatV3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Meta().Version; got != FormatV3 {
+		t.Fatalf("new file version = %d, want %d", got, FormatV3)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err = Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if got := p.Meta().Version; got != FormatV3 {
+		t.Fatalf("reopened version = %d, want %d", got, FormatV3)
+	}
+}
+
+func TestUpgradeFormatV2ToV3IsPersisted(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	p, err := Open(path, Options{Format: FormatV2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UpgradeFormat(FormatV3); err != nil {
+		t.Fatalf("UpgradeFormat(v3) error = %v", err)
+	}
+	if err := p.PublishMeta(p.Meta()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err = Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if got := p.Meta().Version; got != FormatV3 {
+		t.Fatalf("reopened version = %d, want %d", got, FormatV3)
+	}
+}
+
+func TestUpgradeFormatRejectsInvalidMoves(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cases := []struct {
+		name   string
+		format uint32
+		to     uint32
+	}{
+		{"v1 to v3", FormatV1, FormatV3},
+		{"v3 to v3", FormatV3, FormatV3},
+		{"v2 to v1", FormatV2, FormatV1},
+	}
+	for _, tc := range cases {
+		p, err := Open(filepath.Join(dir, tc.name+".db"), Options{Format: tc.format})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.UpgradeFormat(tc.to); !errors.Is(err, ErrInvalidFormat) {
+			t.Fatalf("%s: UpgradeFormat error = %v, want ErrInvalidFormat", tc.name, err)
+		}
+		if got := p.Meta().Version; got != tc.format {
+			t.Fatalf("%s: version changed to %d after rejected upgrade", tc.name, got)
+		}
+		p.Close()
 	}
 }
 

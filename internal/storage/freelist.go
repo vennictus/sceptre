@@ -1,11 +1,10 @@
 package storage
 
-import (
-	"encoding/binary"
-	"sort"
-)
+import "encoding/binary"
 
-// Freelist page layout after the header:
+// Format v2 freelist page layout after the header. v2 files are read with
+// loadFreelist and converted to a free tree by their first commit; nothing
+// writes this layout anymore.
 //
 //	24 uint64  next freelist page, or 0
 //	32 uint32  entry count
@@ -21,11 +20,6 @@ const (
 )
 
 func freelistCapacity(pageSize int) int { return (pageSize - freeEntriesOff) / freeEntrySize }
-
-func freelistPagesFor(pageSize, entries int) int {
-	c := freelistCapacity(pageSize)
-	return (entries + c - 1) / c
-}
 
 // loadFreelist reads the freelist chain of a committed state.
 func loadFreelist(src pageSource, pageCount, head uint64) (map[uint64]uint64, []uint64, error) {
@@ -68,34 +62,4 @@ func loadFreelist(src pageSource, pageCount, head uint64) (map[uint64]uint64, []
 		}
 	}
 	return free, pages, nil
-}
-
-// encodeFreelist spreads entries across the given pages in page-ID order.
-func encodeFreelist(pageSize int, free map[uint64]uint64, pages []uint64) map[uint64][]byte {
-	ids := make([]uint64, 0, len(free))
-	for id := range free {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	capacity := freelistCapacity(pageSize)
-	out := make(map[uint64][]byte, len(pages))
-	for i, pid := range pages {
-		page := newPage(pageSize, pageFreelist)
-		if i+1 < len(pages) {
-			binary.LittleEndian.PutUint64(page[freeNextOff:], pages[i+1])
-		}
-		chunk := ids
-		if len(chunk) > capacity {
-			chunk = chunk[:capacity]
-		}
-		ids = ids[len(chunk):]
-		binary.LittleEndian.PutUint32(page[freeCountOff:], uint32(len(chunk)))
-		for j, fid := range chunk {
-			at := freeEntriesOff + j*freeEntrySize
-			binary.LittleEndian.PutUint64(page[at:], fid)
-			binary.LittleEndian.PutUint64(page[at+8:], free[fid])
-		}
-		out[pid] = page
-	}
-	return out
 }

@@ -129,7 +129,7 @@ go run ./cmd/sceptre demo
 <td width="50%">
 
 ### Reliability Tooling
-- **Consistency checker** that verifies every page, both trees, the freelist, and all rows and indexes
+- **Consistency checker** that verifies every page, the data and free trees, free-page accounting, and all rows and indexes
 - **Commit interruption tests** at page-write, sync, and meta-publish stages
 - **Randomized recovery sampling** with reproducible seeds
 - **OS ownership lock** released automatically on process exit
@@ -174,7 +174,7 @@ reliability: consistency check ok; crash recovery ok across 9 cases
 | `explain-analyze` | Run a select and show measured counters | `sceptre explain-analyze app.db "select * from users where age = 42"` |
 | `trace` | Show compact execution row flow | `sceptre trace app.db "select * from users where age = 42"` |
 | `check` | Validate database consistency | `sceptre check app.db` |
-| `upgrade` | Convert a format v1 database to v2 | `sceptre upgrade app.db` |
+| `upgrade` | Convert a format v1 database to v3 | `sceptre upgrade app.db` |
 | `crash-test` | Verify commit interruption recovery | `sceptre crash-test scratch.db --random 20 --seed 42` |
 | `inspect meta` | Show active meta-page state | `sceptre inspect meta app.db` |
 | `inspect pages` | List physical page inventory | `sceptre inspect pages app.db` |
@@ -229,7 +229,9 @@ indexed CRUD workloads.
 
 Databases created before format v2 must be converted once with
 `sceptre upgrade <db>`, which verifies the copy and keeps the original as a
-backup.
+backup. Format v2 files open normally and convert to v3 with their first commit.
+Format v3 keeps free pages in a B+ tree; binaries that only know v2 reject v3
+files, and there is no downgrade.
 
 The detailed supported boundaries are in [PRODUCT_SPEC.md](PRODUCT_SPEC.md).
 
@@ -249,8 +251,8 @@ sceptre/
 ├── internal/table       # Schemas, records, primary keys, secondary indexes, checks
 ├── internal/tx          # Internal transaction primitives and conflict detection
 ├── internal/kv          # Atomic key/value batches, snapshots, iterators
-├── internal/storage     # Copy-on-write B+ tree engine: pages, cache, freelist, commits
-├── internal/upgrade     # Format v1 to v2 conversion (with internal/btree for v1)
+├── internal/storage     # Copy-on-write B+ tree engine: pages, cache, free tree, commits
+├── internal/upgrade     # Format v1 to v3 conversion (with internal/btree for v1)
 ├── internal/pager       # File pages, meta slots, format versions, fsync, ownership lock
 └── internal/debug       # Inspection and crash/recovery tooling
 ```
