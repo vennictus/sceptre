@@ -244,3 +244,17 @@ commit changes. The remaining bytes are the changed data path, the directory
 leaf, and the free tree records. This is one benchmark on one shared development
 machine, so treat the latency figures as an observation rather than a
 throughput claim.
+
+## Public API reads: 2026-10-28
+
+`go test -run '^$' -bench ParallelSelect .` (in the repository root) measures
+point SELECTs through `DB.Execute` from parallel callers: 18 threads over 1,000
+rows, on the WSL2 machine above with Go 1.22.2. Values are the median of three
+2-second runs.
+
+With every call taking the execution gate (`main` at `2144551`), a call takes
+about 19.8 µs. With reads on snapshots, a call takes about 5.6 µs, about 3.5
+times the throughput.
+
+Each call still parses its statement twice: once to classify it as a read and
+once to execute it. This is a known remaining cost.
