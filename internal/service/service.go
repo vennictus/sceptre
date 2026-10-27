@@ -158,6 +158,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), h.opts.RequestTimeout)
 	defer cancel()
+	// Schema, explain, and query requests outside a transaction read a
+	// snapshot: they skip the request gate and are never refused as busy.
+	var pre *query
+	var preValues []sceptre.Value
+	if path := r.URL.Path; path == "/api/schema" || path == "/api/explain" || path == "/api/execute" {
+		q, values, status, fail := h.decodeQuery(w, r)
+		if fail != nil {
+			h.write(w, status, response{Error: fail})
+			return
+		}
+		if path != "/api/execute" || sceptre.IsQuery(q.SQL, values...) {
+			h.serveRead(ctx, w, path, q, values)
+			return
+		}
+		pre, preValues = q, values // a write: continue under the gate
+	}
 	select {
 	case <-h.done:
 		h.write(w, 503, response{Error: &failure{"closed", "service closed"}})
@@ -187,22 +203,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.active != nil && !start.Before(h.active.expires) {
 		h.rollback()
 	}
-	var q *query
-	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&q); err != nil || q == nil {
-		h.badBody(w, r, err)
-		return
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		h.badBody(w, r, errors.New("exactly one JSON object required"))
-		return
-	}
-	values, err := q.bindings()
-	if err != nil {
-		h.write(w, 400, response{Error: &failure{"parameter", err.Error()}, Transaction: h.sessionFor(r)})
-		return
+	q, values := pre, preValues
+	if q == nil {
+		var status int
+		var fail *failure
+		if q, values, status, fail = h.decodeQuery(w, r); fail != nil {
+			h.write(w, status, response{Error: fail, Transaction: h.sessionFor(r)})
+			return
+		}
 	}
 	path := r.URL.Path
 	withTx := strings.HasPrefix(path, "/api/tx/") && path != "/api/tx/begin"
@@ -287,15 +295,72 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.rollback()
 	}
 }
-func (h *Handler) badBody(w http.ResponseWriter, r *http.Request, err error) {
-	status := 400
-	code := "invalid"
-	var size *http.MaxBytesError
-	if errors.As(err, &size) {
-		status = 413
-		code = "limit"
+
+// decodeQuery reads exactly one bounded JSON query and its bindings. On
+// failure it returns the HTTP status and error to report. It touches no
+// transaction state, so it is safe without the request gate.
+func (h *Handler) decodeQuery(w http.ResponseWriter, r *http.Request) (*query, []sceptre.Value, int, *failure) {
+	var q *query
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&q)
+	if err == nil && q == nil {
+		err = errors.New("null request")
 	}
-	h.write(w, status, response{Error: &failure{code, "invalid or oversized JSON request"}, Transaction: h.sessionFor(r)})
+	if err == nil && decoder.Decode(new(any)) != io.EOF {
+		err = errors.New("exactly one JSON object required")
+	}
+	if err != nil {
+		var size *http.MaxBytesError
+		if errors.As(err, &size) {
+			return nil, nil, 413, &failure{"limit", "invalid or oversized JSON request"}
+		}
+		return nil, nil, 400, &failure{"invalid", "invalid or oversized JSON request"}
+	}
+	values, err := q.bindings()
+	if err != nil {
+		return nil, nil, 400, &failure{"parameter", err.Error()}
+	}
+	return q, values, 0, nil
+}
+
+// serveRead answers a schema, explain, or query request from a snapshot. It
+// takes neither the request gate nor transaction state, so a read never waits
+// for, or is refused because of, another client's open transaction.
+func (h *Handler) serveRead(ctx context.Context, w http.ResponseWriter, path string, q *query, values []sceptre.Value) {
+	select {
+	case <-h.done:
+		h.write(w, 503, response{Error: &failure{"closed", "service closed"}})
+		return
+	default:
+	}
+	start := time.Now()
+	out := response{}
+	var err error
+	switch path {
+	case "/api/execute":
+		var res sceptre.Result
+		if res, err = h.db.Execute(ctx, q.SQL, values...); err == nil {
+			out.Result = resultWire(res)
+		}
+	case "/api/explain":
+		var p sceptre.Plan
+		if p, err = h.db.Explain(ctx, q.SQL, values...); err == nil {
+			out.Plan = planWire(p)
+		}
+	case "/api/schema":
+		var defs []sceptre.TableDef
+		if defs, err = h.db.Tables(ctx); err == nil {
+			out.Schema = schemas(defs)
+		}
+	}
+	out.DurationMS = float64(time.Since(start).Microseconds()) / 1000
+	status := 200
+	if err != nil {
+		out.Error, status = errorWire(err)
+	}
+	h.write(w, status, out)
 }
 func errorWire(err error) (*failure, int) {
 	code := sceptre.CodeStorage

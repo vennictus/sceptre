@@ -19,9 +19,9 @@ Within the owner, the storage engine allows one writer at a time and any number
 of concurrent readers. Readers use snapshots and never block, or wait for, the
 writer. The KV layer is safe for concurrent use on that basis. Table and SQL
 operations combine several reads and writes, so raw internal table/SQL use still
-requires caller serialization. The [public Go API](API.md) serializes
-transactions and coordinates all its reads, writes, and close operations; public
-callers may use it concurrently. `sceptre serve` adds a loopback-only HTTP
+requires caller serialization. The [public Go API](API.md) serializes writes and
+transactions, runs read-only work on snapshots concurrently with them, and
+coordinates close; public callers may use it concurrently. `sceptre serve` adds a loopback-only HTTP
 service and Studio over the same API ([local service](SERVICE.md)); there is no
 network server, user accounts, TLS, or connection pool in this version.
 
@@ -71,8 +71,10 @@ SQL text does not expose BEGIN, COMMIT, or ROLLBACK. The public Go API exposes
 Begin, Execute, Commit, and Rollback. Table/SQL execution within a public transaction
 uses transaction-aware KV reads, scans, and atomic statement staging. Schema and
 index backfill participate alongside rows. Pending changes are visible to that
-transaction. The API serializes whole transactions, including read-only work,
-so concurrent public requests execute in a serial order. Failed statements leave
+transaction. The API serializes write transactions. Read-only work outside a
+transaction (SELECT through `DB.Execute`, `DB.Tables`, `DB.Explain`, and
+`ReadTx`) runs on committed snapshots without that serialization and never sees
+pending changes. Failed statements leave
 prior successful work intact and the transaction usable. Public Commit ends it
 on every outcome; Close aborts open work. See [API.md](API.md) for lifecycle,
 cancellation, and outcome handling. CLI statements still commit independently.
@@ -213,7 +215,7 @@ guarantees in this version.
 
 | Path | Implemented responsibility |
 | --- | --- |
-| `sceptre.go`, `errors.go` | Serialized public execution, transaction lifecycle, result bounds, stable error categories |
+| `sceptre.go`, `readtx.go`, `errors.go` | Serialized public writes and transactions, snapshot reads (SELECT through `DB.Execute`, `DB.Tables`, `DB.Explain`, and `ReadTx`), transaction lifecycle, result bounds, stable error categories |
 | `cmd/sceptre/main.go`, `upgrade.go` | CLI dispatch, shell, rendering, demo, diagnostics, v1 upgrade |
 | `cmd/sceptre/serve.go`, `internal/service` | Loopback HTTP service, request security, transaction ownership and expiry, wire encoding, embedded Studio |
 | `internal/sql/parser.go`, `lexer.go`, `validate.go` | Syntax and schema/type binding |
@@ -257,7 +259,12 @@ workloads compare scans, point and index reads with a map oracle and repeatedly
 reopen the database. Public API regressions verify multi-statement
 catalog/row/index commit and rollback, read-your-writes, failed statements,
 serialized request ownership, context waiting, close, and physical commit
-errors. Seeded transaction workloads compare pending and committed index results
+errors. Public API tests race eight readers against Close: each read either
+succeeds or fails with `closed`; without Close waiting for reads, they fail with
+a raw storage error. Other public tests run concurrent readers during
+two-statement transfers and check that every read sees a whole committed state,
+under the race detector. Service tests run concurrent reads during another
+client's transaction. Seeded transaction workloads compare pending and committed index results
 with a map model through rollback and reopen. Upgrade tests convert a database
 written by the last v1 release.
 

@@ -38,6 +38,8 @@ var (
 	ErrLimit            = errors.New("sceptre: request limit exceeded")
 	ErrCommitCommitted  = kv.ErrCommitCommitted
 	ErrRecoveryRequired = kv.ErrRecoveryRequired
+	// ErrReadOnly reports a write statement in a read-only transaction.
+	ErrReadOnly = kv.ErrReadOnly
 )
 
 // Options controls opening and the maximum SELECT rows returned per request.
@@ -48,8 +50,10 @@ type Options struct {
 }
 
 // DB owns a database file. All public operations are safe for concurrent calls.
-// One transaction at a time owns the execution path, including read operations.
-// A DB must be created with Open and must not be copied after use.
+// Write transactions own the execution path one at a time. Reads (SELECT
+// through Execute, Tables, Explain, and ReadTx) run on snapshots alongside
+// them and each other. A DB must be created with Open and must not be copied
+// after use.
 type DB struct {
 	mu      sync.Mutex
 	store   *kv.KV
@@ -58,6 +62,7 @@ type DB struct {
 	active  *Tx
 	closed  bool
 	maxRows int
+	reads   sync.WaitGroup // read operations in flight; Close waits for them
 }
 
 // Open acquires exclusive file ownership and recovers the latest valid state.
@@ -114,7 +119,8 @@ func (db *DB) Begin(ctx context.Context) (*Tx, error) {
 }
 
 // Close aborts an open transaction, wakes waiting requests, and releases the file.
-// It waits for any currently executing operation to finish. Repeated Close is safe.
+// It waits for any currently executing operation, including reads on
+// snapshots, to finish; later operations fail with closed. Repeated Close is safe.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -126,12 +132,37 @@ func (db *DB) Close() error {
 	if db.active != nil {
 		db.active.finish()
 	}
+	// Read operations never take db.mu while running, so waiting here is safe,
+	// and new ones block on db.mu until they can see closed.
+	db.reads.Wait()
 	return executionError(db.store.Close())
 }
 
-// Execute runs one statement in an automatic transaction. On commit failure,
-// inspect Error.Code: committed and uncertain outcomes require different handling.
+// enterRead registers a read operation, failing once the database is closed.
+func (db *DB) enterRead() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed {
+		return ErrClosed
+	}
+	db.reads.Add(1)
+	return nil
+}
+
+// Execute runs one statement in an automatic transaction. A SELECT reads the
+// latest committed state on a snapshot and never waits for an open write
+// transaction. Other statements wait for exclusive execution. On commit
+// failure, inspect Error.Code: committed and uncertain outcomes require
+// different handling.
 func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result, error) {
+	if isSelect(input, args) {
+		r, err := db.BeginRead(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		defer r.Close()
+		return r.Execute(ctx, input, args...)
+	}
 	t, err := db.Begin(ctx)
 	if err != nil {
 		return Result{}, err
@@ -144,22 +175,44 @@ func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result,
 	return result, t.Commit(ctx)
 }
 
+// IsQuery reports whether input is a statement that only reads (a SELECT),
+// parsed with its bindings as Execute parses it. DB.Execute runs such
+// statements on a snapshot without waiting for an open write transaction.
+// Input that does not parse is not a query.
+func IsQuery(input string, args ...Value) bool { return isSelect(input, args) }
+
+// isSelect reports whether input is a SELECT, parsing with its bindings as
+// execution does. Statements that fail to parse take the write path, which
+// reports the same error.
+func isSelect(input string, args []Value) bool {
+	stmt, err := sql.ParseParameters(input, args)
+	if err != nil {
+		return false
+	}
+	_, ok := stmt.(*sql.SelectStmt)
+	return ok
+}
+
+// Tables lists table definitions from the latest committed state, without
+// waiting for an open write transaction.
 func (db *DB) Tables(ctx context.Context) ([]TableDef, error) {
-	t, err := db.Begin(ctx)
+	r, err := db.BeginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer t.Rollback()
-	return t.Tables(ctx)
+	defer r.Close()
+	return r.Tables(ctx)
 }
 
+// Explain plans a statement against the latest committed state, without
+// waiting for an open write transaction.
 func (db *DB) Explain(ctx context.Context, input string, args ...Value) (Plan, error) {
-	t, err := db.Begin(ctx)
+	r, err := db.BeginRead(ctx)
 	if err != nil {
 		return Plan{}, err
 	}
-	defer t.Rollback()
-	return t.Explain(ctx, input, args...)
+	defer r.Close()
+	return r.Explain(ctx, input, args...)
 }
 
 func (db *DB) Check(ctx context.Context) (CheckReport, error) {
@@ -203,7 +256,8 @@ func (t *Tx) ready(ctx context.Context) error {
 	return t.db.store.Err()
 }
 
-func (t *Tx) statement(input string, args []Value) (sql.Statement, error) {
+// statement parses one statement with the request bounds and caps SELECT output.
+func (db *DB) statement(input string, args []Value) (sql.Statement, error) {
 	if len(input) > 65536 || len(args) > 256 {
 		return nil, ErrLimit
 	}
@@ -212,8 +266,8 @@ func (t *Tx) statement(input string, args []Value) (sql.Statement, error) {
 		return nil, err
 	}
 	if s, ok := stmt.(*sql.SelectStmt); ok {
-		if s.Limit == nil || *s.Limit > int64(t.db.maxRows) {
-			n := int64(t.db.maxRows)
+		if s.Limit == nil || *s.Limit > int64(db.maxRows) {
+			n := int64(db.maxRows)
 			s.Limit = &n
 		}
 	}
@@ -228,7 +282,7 @@ func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, 
 	if err := t.ready(ctx); err != nil {
 		return Result{}, executionError(err)
 	}
-	stmt, err := t.statement(input, args)
+	stmt, err := t.db.statement(input, args)
 	if err != nil {
 		return Result{}, executionError(err)
 	}
@@ -252,7 +306,7 @@ func (t *Tx) Explain(ctx context.Context, input string, args ...Value) (Plan, er
 	if err := t.ready(ctx); err != nil {
 		return Plan{}, executionError(err)
 	}
-	stmt, err := t.statement(input, args)
+	stmt, err := t.db.statement(input, args)
 	if err != nil {
 		return Plan{}, executionError(err)
 	}
