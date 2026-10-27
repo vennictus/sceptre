@@ -56,14 +56,26 @@ Every response has the same shape:
 `code` (the Go API codes plus `forbidden`, `unauthorized`, `method`, `busy`) and
 a human-readable `message` that may change.
 
+## Reads
+
+Outside a transaction, `/api/schema`, `/api/explain`, and `/api/execute` (when
+the statement is a SELECT) read the latest committed state on a snapshot. They
+skip the request gate, so they are never refused as `busy` while another client
+holds a transaction, and they see only committed data. A write sent to
+`/api/execute` outside that transaction still gets `409 busy` while another
+client holds a transaction. Transaction routes (`/api/tx/...`) are unchanged:
+inside a transaction, reads see that transaction's own pending changes.
+
 ## Transactions
 
-The service runs one execution owner at a time, like the Go API.
+The service serializes writes and transactions, like the Go API. Reads outside a
+transaction are described above.
 
 - `/api/tx/begin` needs an `X-Sceptre-Client` header (16 to 128 characters). Later
   transaction requests send the same header plus `X-Sceptre-Transaction` with the
   returned ID. Other clients cannot use the transaction.
-- While a transaction is open, other requests receive `409 busy`.
+- While a transaction is open, other writes and transaction requests outside it
+  receive `409 busy`.
 - A transaction expires after `--transaction-ttl` (default 1 minute) and is rolled
   back, so an abandoned client cannot hold the database.
 - A failed statement leaves the transaction usable.
@@ -80,4 +92,5 @@ reopened.
 
 SELECT output is capped by `--max-rows` (default 1000). The cap bounds returned
 rows, not engine memory: execution still collects candidates before limiting.
-Requests to the engine are serialized; long statements delay other clients.
+Writes and transactions are serialized; a long write statement delays other
+writes. Reads outside a transaction run on snapshots and are not serialized.
