@@ -265,9 +265,22 @@ func TestTransactionOwnershipAndBusy(t *testing.T) {
 	f := newFixture(t, Options{})
 	f.mustSQL("CREATE TABLE items (id int64, PRIMARY KEY (id))")
 	id := f.begin()
+	f.sql("/api/tx/execute", "INSERT INTO items (id) VALUES (7)", withTx(id))
 
-	if r := f.sql("/api/execute", "SELECT * FROM items", nil); r.Status != 409 || r.Body.Error.Code != "busy" {
-		t.Fatalf("autocommit during transaction: %d %+v", r.Status, r.Body.Error)
+	// Reads outside the transaction run on a snapshot: not busy, and they do
+	// not see its uncommitted row. Schema and explain likewise.
+	if r := f.sql("/api/execute", "SELECT * FROM items", nil); r.Status != 200 || len(r.Body.Result.Rows) != 0 {
+		t.Fatalf("read during another client's transaction: %d %+v %+v", r.Status, r.Body.Error, r.Body.Result)
+	}
+	if r := f.call("/api/schema", "{}", nil); r.Status != 200 || len(r.Body.Schema) != 1 {
+		t.Fatalf("schema during transaction: %d %+v", r.Status, r.Body.Error)
+	}
+	if r := f.sql("/api/explain", "SELECT * FROM items WHERE id = 7", nil); r.Status != 200 || r.Body.Plan == nil {
+		t.Fatalf("explain during transaction: %d %+v", r.Status, r.Body.Error)
+	}
+	// Writes outside the transaction still wait their turn: busy.
+	if r := f.sql("/api/execute", "INSERT INTO items (id) VALUES (8)", nil); r.Status != 409 || r.Body.Error.Code != "busy" {
+		t.Fatalf("write during another client's transaction: %d %+v", r.Status, r.Body.Error)
 	}
 	if r := f.call("/api/tx/begin", "{}", nil); r.Status != 409 || r.Body.Error.Code != "busy" {
 		t.Fatalf("second begin: %d %+v", r.Status, r.Body.Error)
@@ -294,13 +307,11 @@ func TestAbandonedTransactionExpires(t *testing.T) {
 	id := f.begin()
 	f.sql("/api/tx/execute", "INSERT INTO items (id) VALUES (1)", withTx(id))
 
+	// Poll the transaction itself until the service expires it.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		r := f.sql("/api/execute", "SELECT * FROM items", nil)
-		if r.Status == 200 {
-			if len(r.Body.Result.Rows) != 0 {
-				t.Fatalf("expired transaction committed: %+v", r.Body.Result.Rows)
-			}
+		r := f.sql("/api/tx/execute", "SELECT * FROM items", withTx(id))
+		if r.Status == 409 && r.Body.Error.Code == "transaction_closed" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -308,9 +319,11 @@ func TestAbandonedTransactionExpires(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if r := f.sql("/api/tx/execute", "SELECT * FROM items", withTx(id)); r.Status != 409 {
-		t.Fatalf("expired transaction still usable: %d", r.Status)
+	// It was rolled back, and the writer slot is free again.
+	if r := f.sql("/api/execute", "SELECT * FROM items", nil); r.Status != 200 || len(r.Body.Result.Rows) != 0 {
+		t.Fatalf("expired transaction committed: %d %+v", r.Status, r.Body.Result)
 	}
+	f.mustSQL("INSERT INTO items (id) VALUES (2)")
 }
 
 func TestOversizedResponseKeepsTransaction(t *testing.T) {
