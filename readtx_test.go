@@ -1,7 +1,10 @@
 package sceptre
 
 import (
+	"errors"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestReadTxSeesOneCommittedState(t *testing.T) {
@@ -75,4 +78,53 @@ func TestReadTxCloseIsFinal(t *testing.T) {
 	if _, err := db.BeginRead(nil); err == nil { // a nil context is rejected, not dereferenced
 		t.Fatal("BeginRead accepted a nil context")
 	}
+}
+
+// Reads racing with Close either finish normally or fail with closed; none
+// sees the file disappear underneath it.
+func TestCloseWaitsForInFlightReads(t *testing.T) {
+	t.Parallel()
+	db, _ := openTestDB(t, Options{})
+	execOK(t, db, createPosts)
+	for i := 0; i < 200; i++ {
+		execOK(t, db, "insert into posts (id, body, state) values (?, 'row', 0)", Int64(int64(i)))
+	}
+	held, err := db.BeginRead(background)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				_, err := db.Execute(background, "select * from posts")
+				if err == nil {
+					continue
+				}
+				var e *Error
+				if !errors.As(err, &e) || e.Code != CodeClosed {
+					errs <- err
+				}
+				return
+			}
+		}()
+	}
+	time.Sleep(time.Millisecond)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("read during Close failed with something other than closed: %v", err)
+	}
+	_, err = held.Execute(background, "select * from posts")
+	assertCode(t, err, CodeClosed)
+	_, err = db.BeginRead(background)
+	assertCode(t, err, CodeClosed)
 }
