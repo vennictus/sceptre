@@ -216,3 +216,25 @@ func TestConcurrentReadsSeeOnlyWholeCommits(t *testing.T) {
 		}
 	}
 }
+
+func TestIsQueryClassifiesStatements(t *testing.T) {
+	for q, want := range map[string]bool{
+		"select * from posts":                         true,
+		"SELECT id FROM posts WHERE id = 1 LIMIT 2":   true,
+		"insert into posts (id) values (1)":           false,
+		"update posts set state = 1":                  false,
+		"delete from posts":                           false,
+		"create table t (id int64, primary key (id))": false,
+		"selec nonsense":                              false,
+	} {
+		if got := IsQuery(q); got != want {
+			t.Errorf("IsQuery(%q) = %v, want %v", q, got, want)
+		}
+	}
+	if !IsQuery("select * from posts where id = ?", Int64(1)) {
+		t.Error("parameterized SELECT not recognized")
+	}
+	if IsQuery("select * from posts where id = ?") {
+		t.Error("SELECT with a missing binding classified as a query")
+	}
+}

@@ -173,6 +173,12 @@ func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result,
 	return result, t.Commit(ctx)
 }
 
+// IsQuery reports whether input is a statement that only reads (a SELECT),
+// parsed with its bindings as Execute parses it. DB.Execute runs such
+// statements on a snapshot without waiting for an open write transaction.
+// Input that does not parse is not a query.
+func IsQuery(input string, args ...Value) bool { return isSelect(input, args) }
+
 // isSelect reports whether input is a SELECT, parsing with its bindings as
 // execution does. Statements that fail to parse take the write path, which
 // reports the same error.
