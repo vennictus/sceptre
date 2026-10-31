@@ -45,6 +45,8 @@ type Tx struct {
 	order    []string
 	closed   bool
 	scanned  bool
+	undo     []undoEntry // kept only while a savepoint exists
+	marks    int         // open savepoints
 }
 
 // NewManager creates a transaction manager for a KV store.
@@ -175,7 +177,11 @@ func (tx *Tx) Abort() {
 
 func (tx *Tx) record(mutation kv.Mutation) {
 	key := string(mutation.Key)
-	if _, exists := tx.pending[key]; !exists {
+	prev, exists := tx.pending[key]
+	if tx.marks > 0 {
+		tx.undo = append(tx.undo, undoEntry{key: key, prev: prev, existed: exists})
+	}
+	if !exists {
 		tx.order = append(tx.order, key)
 	}
 	tx.pending[key] = pendingMutation{mutation: mutation}
@@ -290,6 +296,7 @@ func (tx *Tx) close() {
 	tx.reads = nil
 	tx.writes = nil
 	tx.order = nil
+	tx.undo = nil
 	tx.snapshot.Release()
 	tx.snapshot = nil
 }
