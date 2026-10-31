@@ -40,6 +40,8 @@ func ExecuteStatement(db *table.DB, stmt Statement) (Result, error) {
 		return executeUpdate(db, stmt)
 	case *DeleteStmt:
 		return executeDelete(db, stmt)
+	case *BeginStmt, *CommitStmt, *RollbackStmt, *SavepointStmt, *ReleaseStmt:
+		return Result{}, fmt.Errorf("%w: transaction control is handled by the caller", ErrExec)
 	default:
 		return Result{}, fmt.Errorf("%w: unknown statement", ErrExec)
 	}

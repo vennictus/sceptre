@@ -52,8 +52,45 @@ func (p *parser) parseStatement() (Statement, error) {
 		return p.parseUpdate()
 	case p.matchKeyword("delete"):
 		return p.parseDelete()
+	case p.matchKeyword("begin"):
+		p.matchTransactionWord()
+		return &BeginStmt{}, nil
+	case p.matchKeyword("commit"):
+		p.matchTransactionWord()
+		return &CommitStmt{}, nil
+	case p.matchKeyword("rollback"):
+		p.matchTransactionWord()
+		if !p.matchKeyword("to") {
+			return &RollbackStmt{}, nil
+		}
+		p.matchKeyword("savepoint")
+		name, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		return &RollbackStmt{Savepoint: strings.ToLower(name)}, nil
+	case p.matchKeyword("savepoint"):
+		name, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		return &SavepointStmt{Name: strings.ToLower(name)}, nil
+	case p.matchKeyword("release"):
+		p.matchKeyword("savepoint")
+		name, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		return &ReleaseStmt{Name: strings.ToLower(name)}, nil
 	}
 	return nil, p.errorf("expected statement")
+}
+
+// matchTransactionWord skips the optional TRANSACTION or WORK noise word.
+func (p *parser) matchTransactionWord() {
+	if !p.matchKeyword("transaction") {
+		p.matchKeyword("work")
+	}
 }
 
 func (p *parser) parseCreateTable() (Statement, error) {
