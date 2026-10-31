@@ -27,6 +27,9 @@ const (
 	CodeCommitted         Code = "committed"
 	CodeUncertain         Code = "uncertain"
 	CodeReadOnly          Code = "read_only"
+	// CodeTransactionState reports a statement that does not fit the current
+	// transaction state, such as COMMIT with no transaction open.
+	CodeTransactionState Code = "transaction_state"
 )
 
 // Error preserves its underlying error for errors.Is and errors.As.
@@ -58,6 +61,10 @@ func executionError(err error) error {
 		code = CodeClosed
 	case errors.Is(err, ErrTxClosed):
 		code = CodeTransactionClosed
+	case errors.Is(err, ErrTransactionState):
+		code = CodeTransactionState
+	case errors.Is(err, ErrNoSavepoint):
+		code = CodeNotFound
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		code = CodeCanceled
 	case errors.Is(err, ErrLimit):
