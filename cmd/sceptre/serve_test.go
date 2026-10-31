@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vennictus/sceptre"
 )
 
 func TestParseServeDefaults(t *testing.T) {
@@ -12,11 +14,11 @@ func TestParseServeDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.path != "app.db" || opts.addr != "127.0.0.1:7463" || opts.rows != 1000 || opts.ttl != time.Minute {
+	if opts.path != "app.db" || opts.addr != "127.0.0.1:7463" || opts.rows != 1000 || opts.ttl != time.Minute || opts.durability != sceptre.DurabilityFull {
 		t.Fatalf("defaults = %+v", opts)
 	}
-	opts, err = parseServe([]string{"app.db", "--addr", "[::1]:9000", "--max-rows", "50", "--transaction-ttl", "30s"})
-	if err != nil || opts.addr != "[::1]:9000" || opts.rows != 50 || opts.ttl != 30*time.Second {
+	opts, err = parseServe([]string{"app.db", "--addr", "[::1]:9000", "--max-rows", "50", "--transaction-ttl", "30s", "--durability", "normal"})
+	if err != nil || opts.addr != "[::1]:9000" || opts.rows != 50 || opts.ttl != 30*time.Second || opts.durability != sceptre.DurabilityNormal {
 		t.Fatalf("flags = %+v, %v", opts, err)
 	}
 }
@@ -35,6 +37,7 @@ func TestParseServeRejectsUnsafeOrInvalidInput(t *testing.T) {
 		"long ttl":       {"app.db", "--transaction-ttl", "1h"},
 		"extra argument": {"app.db", "other.db"},
 		"unknown flag":   {"app.db", "--public"},
+		"bad durability": {"app.db", "--durability", "off"},
 	} {
 		if _, err := parseServe(args); err == nil {
 			t.Errorf("%s: accepted %v", name, args)
