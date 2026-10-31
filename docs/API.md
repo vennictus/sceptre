@@ -71,6 +71,57 @@ transaction otherwise retains ownership until explicitly finished or the DB
 closes. There is no automatic expiry. The raw internal packages still require
 caller serialization.
 
+## SQL transactions and savepoints
+
+```go
+s := db.Session()
+defer s.Close()
+
+for _, q := range []string{
+    "BEGIN",
+    "insert into posts (id, body) values (1, 'draft')",
+    "SAVEPOINT before_revision",
+    "insert into revisions (id, post_id, body) values (1, 1, 'draft')",
+    "ROLLBACK TO before_revision",
+    "COMMIT",
+} {
+    if _, err := s.Execute(ctx, q); err != nil { return err }
+}
+```
+
+A `Session` runs SQL the way a connection does. `BEGIN [TRANSACTION | WORK]`
+opens a transaction, and `COMMIT` or `ROLLBACK` ends it; outside one, each
+statement runs like `DB.Execute`. Inside, the session holds a `Tx`, so the same
+rules apply: it owns write execution until COMMIT or ROLLBACK, a failed statement
+leaves it usable, and COMMIT ends it on every outcome. `InTransaction` reports
+whether one is open, and `Close` rolls it back.
+
+`SAVEPOINT name`, `RELEASE [SAVEPOINT] name` and `ROLLBACK TO [SAVEPOINT] name`
+work in a Session transaction and in `Tx.Execute`. ROLLBACK TO discards changes
+made after the savepoint, including schema changes, closes the savepoints inside
+it, and keeps it open. RELEASE closes it and those inside it, keeping the
+changes. A name may repeat; the innermost wins. Names are case-insensitive.
+
+Transaction statements that do not fit the state fail with `transaction_state`:
+COMMIT or a savepoint with no transaction open, BEGIN inside one, any of them
+through `DB.Execute`, and BEGIN, COMMIT or ROLLBACK through `Tx.Execute` (use
+`Tx.Commit` and `Tx.Rollback`). An unknown savepoint fails with `not_found`.
+
+## Durability
+
+`Options.Durability` chooses when a commit reaches durable storage:
+
+| Mode | Syncs per commit | On power loss |
+| --- | --- | --- |
+| `DurabilityFull` (default) | 2: pages, then the meta page | Every returned commit survives |
+| `DurabilityNormal` | 1: pages | The latest returned commit can be lost; earlier ones survive |
+
+Neither mode corrupts the file, and a process crash without power loss loses
+nothing in either. Under `DurabilityNormal` the next commit's page sync makes the
+previous commit durable; `DB.Sync` and `DB.Close` make the latest one durable.
+`ParseDurability` accepts `"full"` and `"normal"`. A failed sync that may have
+lost a returned commit makes the handle report `uncertain` until reopened.
+
 ## Read-only snapshots
 
 ```go
@@ -129,11 +180,12 @@ Use `errors.As(err, &executionError)` with `var executionError *sceptre.Error`.
 | Code | Meaning |
 | --- | --- |
 | `parse`, `parameter`, `invalid` | Invalid syntax, bindings, schema/type use, or options; a format v1 file that needs `sceptre upgrade` |
-| `constraint`, `not_found` | Duplicate primary key/schema/index, or missing object |
+| `constraint`, `not_found` | Duplicate primary key/schema/index, or missing object or savepoint |
 | `limit` | Request bound exceeded, a stored key above the page-size limit (1000 bytes at 4096-byte pages), or a value above 1 GiB |
 | `canceled` | Context canceled or deadline expired before work starts |
 | `closed`, `transaction_closed` | Invalid database or transaction lifecycle |
 | `read_only` | A write statement in a read-only transaction (`ReadTx.Execute`) |
+| `transaction_state` | A transaction statement that does not fit the state, such as COMMIT with no transaction open |
 | `storage` | Storage/open error, including a page that fails verification; a commit returning this category was definitely aborted |
 | `committed` | Complete commit occurred despite a post-publication error |
 | `uncertain` | Metadata write/sync outcome is uncertain; close and reopen required |
