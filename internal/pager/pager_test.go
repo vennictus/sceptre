@@ -3,6 +3,7 @@ package pager
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -396,5 +397,40 @@ func TestDecodeMetaRejectsUnknownVersion(t *testing.T) {
 	putUint32(page[metaChecksumOffset:], metaChecksum(page))
 	if _, err := DecodeMeta(page); !errors.Is(err, ErrUnsupportedVersion) {
 		t.Fatalf("DecodeMeta(version 7) error = %v", err)
+	}
+}
+
+func TestPublishMetaUnsyncedSkipsSyncAndActivates(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "sceptre.db")
+	syncs := 0
+	p, err := Open(path, Options{PageSize: 512, IO: &IOHooks{Sync: func(f *os.File) error {
+		syncs++
+		return f.Sync()
+	}}})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	before, slot := syncs, p.ActiveMetaSlot()
+	meta := p.Meta()
+	meta.PageCount = 3
+	if err := p.PublishMetaUnsynced(meta); err != nil {
+		t.Fatalf("PublishMetaUnsynced() error = %v", err)
+	}
+	if syncs != before {
+		t.Fatalf("syncs = %d, want %d", syncs, before)
+	}
+	if p.ActiveMetaSlot() == slot || p.Meta().PageCount != 3 {
+		t.Fatalf("meta not activated: slot %d page count %d", p.ActiveMetaSlot(), p.Meta().PageCount)
+	}
+	gen := p.Meta().Generation
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p = mustOpenPager(t, path)
+	defer p.Close()
+	if p.Meta().Generation != gen {
+		t.Fatalf("reopened generation = %d, want %d", p.Meta().Generation, gen)
 	}
 }
