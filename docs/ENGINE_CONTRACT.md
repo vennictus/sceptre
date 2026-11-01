@@ -111,19 +111,35 @@ backstop, but callers should close them. Returned key/value bytes are copies.
 
 | Supported | Limits |
 | --- | --- |
-| CREATE TABLE, CREATE INDEX | No ALTER/DROP, migrations, unique secondary indexes, foreign keys, or checks |
-| INSERT | One literal or parameter-bound row; all declared fields required; duplicate primary key rejected |
-| SELECT | Projection, WHERE comparisons, AND/OR and parentheses, nonnegative LIMIT/OFFSET |
-| UPDATE | Literal or parameter assignments to non-key columns |
+| CREATE TABLE, CREATE [UNIQUE] INDEX | `IF NOT EXISTS`; column `NOT NULL`, `NULL`, `UNIQUE`; no foreign keys, CHECK, or DEFAULT |
+| DROP TABLE, DROP INDEX | `IF EXISTS`; `DROP INDEX name ON table` when the name is on several tables |
+| ALTER TABLE | `ADD [COLUMN]` (nullable, optionally UNIQUE), `DROP [COLUMN]` (not key or indexed), `RENAME [COLUMN] a TO b`, `RENAME TO name` |
+| INSERT | One literal or parameter-bound row; omitted nullable columns are NULL; duplicate primary key or unique value rejected |
+| SELECT | Projection, WHERE comparisons, `IS [NOT] NULL`, AND/OR and parentheses, nonnegative LIMIT/OFFSET |
+| UPDATE | Literal, parameter, or NULL assignments to non-key columns |
 | DELETE | Filtered or all-row deletion |
 | Access paths | Full scan, complete primary-key lookup, single-column primary-key range, complete secondary-index equality lookup |
 | Diagnostics | EXPLAIN, measured SELECT analysis, tracing, schema/page/index inspection, integrity checking |
 
-Types are signed int64 and arbitrary bytes. Integers parse within int64 bounds.
-Byte comparisons use byte order, with no locale collation or implicit numeric
-conversion. SQL string literals use single quotes and doubled embedded quotes.
-Keywords are case insensitive; stored identifiers are matched by their spelling.
-There are no NULL values, floating-point/boolean columns, arithmetic expressions,
+Types are signed `int64`, arbitrary `bytes` (also `blob`), and UTF-8 `text`
+(also `string`, `varchar`). Tables created before `text` existed keep their
+`text` columns as bytes. Integers parse within int64 bounds. Bytes and text
+compare in byte order, with no locale collation or implicit numeric conversion.
+A string literal works with bytes and text columns; a text column rejects
+invalid UTF-8. SQL string literals use single quotes and doubled embedded
+quotes. Keywords are case insensitive; stored identifiers are matched by their
+spelling.
+
+Columns accept NULL unless declared `NOT NULL` or in the primary key. A
+comparison with NULL is unknown, WHERE keeps only rows whose predicate is true,
+and AND/OR follow three-valued logic; use `IS NULL` to find NULLs. A unique
+index rejects two rows with equal non-NULL values in all its columns; NULLs never
+conflict. Tables created before NULL support use the previous row encoding and
+reject NULL until a column is added, which rewrites them in the current one.
+DROP COLUMN rewrites every row; other schema changes touch only the catalog and,
+for drops, the removed keys. Each runs in one commit.
+
+There are no floating-point/boolean columns, arithmetic expressions,
 joins, aggregates, or explicit ORDER BY. The public API supports positional typed
 `?` bindings in literal positions, with exact binding counts and no SQL text
 interpolation. CLI parameter input is not implemented.
