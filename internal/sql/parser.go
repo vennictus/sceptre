@@ -37,6 +37,10 @@ func parseTokens(tokens []token) (Statement, error) {
 
 func (p *parser) parseStatement() (Statement, error) {
 	switch {
+	case p.matchKeyword("drop"):
+		return p.parseDrop()
+	case p.matchKeyword("alter"):
+		return p.parseAlterTable()
 	case p.matchKeyword("create"):
 		if p.matchKeyword("table") {
 			return p.parseCreateTable()
@@ -104,7 +108,104 @@ func (p *parser) matchTransactionWord() {
 	}
 }
 
+// matchIfExists reads IF EXISTS, or IF NOT EXISTS when not is set.
+func (p *parser) matchIf(not bool) (bool, error) {
+	if !p.matchKeyword("if") {
+		return false, nil
+	}
+	if not {
+		if err := p.expectKeyword("not"); err != nil {
+			return false, err
+		}
+	}
+	return true, p.expectKeyword("exists")
+}
+
+func (p *parser) parseDrop() (Statement, error) {
+	isTable := p.matchKeyword("table")
+	if !isTable {
+		if err := p.expectKeyword("index"); err != nil {
+			return nil, err
+		}
+	}
+	ifExists, err := p.matchIf(false)
+	if err != nil {
+		return nil, err
+	}
+	name, err := p.expectIdent()
+	if err != nil {
+		return nil, err
+	}
+	if isTable {
+		return &DropTableStmt{Name: name, IfExists: ifExists}, nil
+	}
+	stmt := &DropIndexStmt{Name: name, IfExists: ifExists}
+	if p.matchKeyword("on") {
+		if stmt.Table, err = p.expectIdent(); err != nil {
+			return nil, err
+		}
+	}
+	return stmt, nil
+}
+
+func (p *parser) parseAlterTable() (Statement, error) {
+	if err := p.expectKeyword("table"); err != nil {
+		return nil, err
+	}
+	name, err := p.expectIdent()
+	if err != nil {
+		return nil, err
+	}
+	stmt := &AlterTableStmt{Table: name}
+	switch {
+	case p.matchKeyword("add"):
+		p.matchKeyword("column")
+		column := ColumnDef{}
+		if column.Name, err = p.expectIdent(); err != nil {
+			return nil, err
+		}
+		typeName, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		column.Type = strings.ToLower(typeName)
+		if err := p.parseColumnConstraints(&column); err != nil {
+			return nil, err
+		}
+		stmt.Add = &column
+	case p.matchKeyword("drop"):
+		p.matchKeyword("column")
+		if stmt.Drop, err = p.expectIdent(); err != nil {
+			return nil, err
+		}
+	case p.matchKeyword("rename"):
+		if p.matchKeyword("to") {
+			if stmt.RenameTo, err = p.expectIdent(); err != nil {
+				return nil, err
+			}
+			break
+		}
+		p.matchKeyword("column")
+		if stmt.RenameFrom, err = p.expectIdent(); err != nil {
+			return nil, err
+		}
+		if err := p.expectKeyword("to"); err != nil {
+			return nil, err
+		}
+		if stmt.RenameTo, err = p.expectIdent(); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, p.errorf("expected ADD, DROP or RENAME")
+	}
+	return stmt, nil
+}
+
 func (p *parser) parseCreateTable() (Statement, error) {
+	ifNotExists, err := p.matchIf(true)
+	if err != nil {
+		return nil, err
+	}
 	name, err := p.expectIdent()
 	if err != nil {
 		return nil, err
@@ -149,7 +250,7 @@ func (p *parser) parseCreateTable() (Statement, error) {
 	if err := p.expect(tokenRParen); err != nil {
 		return nil, err
 	}
-	return &CreateTableStmt{Name: name, Columns: columns, PrimaryKey: primaryKey}, nil
+	return &CreateTableStmt{Name: name, Columns: columns, PrimaryKey: primaryKey, IfNotExists: ifNotExists}, nil
 }
 
 // parseColumnConstraints reads NOT NULL, NULL and UNIQUE in any order.
@@ -171,6 +272,10 @@ func (p *parser) parseColumnConstraints(column *ColumnDef) error {
 }
 
 func (p *parser) parseCreateIndex() (Statement, error) {
+	ifNotExists, err := p.matchIf(true)
+	if err != nil {
+		return nil, err
+	}
 	name, err := p.expectIdent()
 	if err != nil {
 		return nil, err
@@ -186,7 +291,7 @@ func (p *parser) parseCreateIndex() (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CreateIndexStmt{Name: name, Table: table, Columns: columns}, nil
+	return &CreateIndexStmt{Name: name, Table: table, Columns: columns, IfNotExists: ifNotExists}, nil
 }
 
 func (p *parser) parseInsert() (Statement, error) {

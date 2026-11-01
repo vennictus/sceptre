@@ -42,6 +42,12 @@ func ExecuteStatement(db *table.DB, stmt Statement) (Result, error) {
 		return executeUpdate(db, stmt)
 	case *DeleteStmt:
 		return executeDelete(db, stmt)
+	case *DropTableStmt:
+		return executeDropTable(db, stmt)
+	case *DropIndexStmt:
+		return executeDropIndex(db, stmt)
+	case *AlterTableStmt:
+		return executeAlterTable(db, stmt)
 	case *BeginStmt, *CommitStmt, *RollbackStmt, *SavepointStmt, *ReleaseStmt:
 		return Result{}, fmt.Errorf("%w: transaction control is handled by the caller", ErrExec)
 	default:
@@ -50,6 +56,11 @@ func ExecuteStatement(db *table.DB, stmt Statement) (Result, error) {
 }
 
 func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
+	if stmt.IfNotExists {
+		if _, ok, err := db.Table(stmt.Name); err != nil || ok {
+			return Result{}, err
+		}
+	}
 	def := table.TableDef{
 		Name:       stmt.Name,
 		Columns:    make([]table.Column, 0, len(stmt.Columns)),
@@ -80,6 +91,11 @@ func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
 }
 
 func executeCreateIndex(db *table.DB, stmt *CreateIndexStmt) (Result, error) {
+	if stmt.IfNotExists {
+		if _, ok, err := db.Index(stmt.Table, stmt.Name); err != nil || ok {
+			return Result{}, err
+		}
+	}
 	err := db.CreateIndex(stmt.Table, table.IndexDef{
 		Name:    stmt.Name,
 		Columns: append([]string(nil), stmt.Columns...),

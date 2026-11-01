@@ -13,18 +13,20 @@ type ColumnDef struct {
 }
 
 type CreateTableStmt struct {
-	Name       string
-	Columns    []ColumnDef
-	PrimaryKey []string
+	Name        string
+	Columns     []ColumnDef
+	PrimaryKey  []string
+	IfNotExists bool
 }
 
 func (*CreateTableStmt) statementNode() {}
 
 type CreateIndexStmt struct {
-	Name    string
-	Table   string
-	Columns []string
-	Unique  bool
+	Name        string
+	Table       string
+	Columns     []string
+	Unique      bool
+	IfNotExists bool
 }
 
 func (*CreateIndexStmt) statementNode() {}
@@ -110,6 +112,37 @@ type IsNullExpr struct {
 }
 
 func (*IsNullExpr) exprNode() {}
+
+// DropTableStmt is DROP TABLE [IF EXISTS] name.
+type DropTableStmt struct {
+	Name     string
+	IfExists bool
+}
+
+func (*DropTableStmt) statementNode() {}
+
+// DropIndexStmt is DROP INDEX [IF EXISTS] name [ON table]. Without ON, the
+// name must identify one index across all tables.
+type DropIndexStmt struct {
+	Name     string
+	Table    string
+	IfExists bool
+}
+
+func (*DropIndexStmt) statementNode() {}
+
+// AlterTableStmt is ALTER TABLE name followed by exactly one action: ADD
+// [COLUMN] def, DROP [COLUMN] name, RENAME [COLUMN] old TO new, or RENAME TO
+// new.
+type AlterTableStmt struct {
+	Table      string
+	Add        *ColumnDef
+	Drop       string
+	RenameFrom string // with RenameTo: rename a column
+	RenameTo   string // alone: rename the table
+}
+
+func (*AlterTableStmt) statementNode() {}
 
 // BeginStmt is BEGIN [TRANSACTION | WORK].
 type BeginStmt struct{}
