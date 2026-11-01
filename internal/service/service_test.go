@@ -430,3 +430,26 @@ func TestConcurrentReadsDuringATransaction(t *testing.T) {
 		t.Fatalf("commit after concurrent reads: %d %+v", r.Status, r.Body.Error)
 	}
 }
+
+func TestTransactionSavepointsAndSQLControl(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.mustSQL("CREATE TABLE items (id int64, PRIMARY KEY (id))")
+	id := f.begin()
+	for _, q := range []string{"INSERT INTO items (id) VALUES (1)", "SAVEPOINT a", "INSERT INTO items (id) VALUES (2)", "ROLLBACK TO a"} {
+		if r := f.sql("/api/tx/execute", q, withTx(id)); r.Status != 200 {
+			t.Fatalf("%s: %d %+v", q, r.Status, r.Body.Error)
+		}
+	}
+	if r := f.sql("/api/tx/execute", "COMMIT", withTx(id)); r.Body.Error == nil || r.Body.Error.Code != "transaction_state" || r.Status != 409 || r.Body.Transaction == nil {
+		t.Fatalf("SQL COMMIT in a transaction route: %d %+v", r.Status, r.Body)
+	}
+	if r := f.call("/api/tx/commit", "{}", withTx(id)); r.Status != 200 {
+		t.Fatalf("commit: %d %+v", r.Status, r.Body)
+	}
+	if n := f.count("items"); n != 1 {
+		t.Fatalf("rows after ROLLBACK TO and commit = %d, want 1", n)
+	}
+	if r := f.sql("/api/execute", "BEGIN", nil); r.Body.Error == nil || r.Body.Error.Code != "transaction_state" {
+		t.Fatalf("SQL BEGIN outside a transaction route: %d %+v", r.Status, r.Body)
+	}
+}

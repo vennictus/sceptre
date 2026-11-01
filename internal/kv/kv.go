@@ -19,6 +19,7 @@ var (
 type Options struct {
 	PageSize             uint32
 	CacheBytes           int
+	Durability           storage.Durability
 	FailAfterCommitStage string
 	IO                   *pager.IOHooks
 }
@@ -63,6 +64,7 @@ func Open(path string, opts Options) (*KV, error) {
 	env, err := storage.Open(path, storage.Options{
 		PageSize:   opts.PageSize,
 		CacheBytes: opts.CacheBytes,
+		Durability: opts.Durability,
 		IO:         opts.IO,
 		CommitHook: store.runCommitHook,
 	})
@@ -80,6 +82,9 @@ func (kv *KV) Close() error {
 	}
 	return kv.env.Close()
 }
+
+// Sync makes every returned commit durable; see storage.DurabilityNormal.
+func (kv *KV) Sync() error { return kv.env.Sync() }
 
 // Err reports whether an uncertain publication has made this handle unusable.
 func (kv *KV) Err() error { return kv.env.Err() }

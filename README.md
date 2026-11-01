@@ -197,12 +197,12 @@ INSERT INTO users (id, name, age, city) VALUES (1, 'Ada', 31, 'delhi');
 SELECT id, name FROM users WHERE age = 31;
 UPDATE users SET age = 32 WHERE id = 1;
 DELETE FROM users WHERE id = 1;
+BEGIN; SAVEPOINT s; ROLLBACK TO s; COMMIT;  -- through a Session, one statement per call
 ```
 
 Supported planner paths include table scans, primary-key lookups,
 primary-key ranges, and exact secondary-index lookups. Joins, aggregations,
-ordering, SQL transaction syntax, and broad SQL compatibility are outside the current
-scope.
+ordering, and broad SQL compatibility are outside the current scope.
 
 SQL validates column references, predicate types, and update assignments before
 scanning, including queries that match no rows. Primary-key assignments in
@@ -223,8 +223,10 @@ Every page is verified by checksum when read, and `sceptre check` verifies the
 whole file. Pages are reused only when neither an open snapshot nor the previous
 meta generation can reach them, so snapshots never change underneath readers and
 the previous generation stays intact. Uncertain metadata I/O errors require
-closing and reopening the handle before further operations. Regression coverage
-includes torn writes, sync failures, subprocess exits, fallback after an
+closing and reopening the handle before further operations. `Options.Durability`
+chooses `full` (default: two syncs per commit) or `normal` (one sync; power loss
+can lose only the latest commit). Regression coverage includes simulated power
+loss, torn writes, sync failures, subprocess exits, fallback after an
 interrupted commit, randomized workloads checked against a model, and seeded
 indexed CRUD workloads.
 

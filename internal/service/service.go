@@ -377,7 +377,7 @@ func errorWire(err error) (*failure, int) {
 		status = 500
 	case sceptre.CodeUncertain, sceptre.CodeClosed:
 		status = 503
-	case sceptre.CodeConstraint, sceptre.CodeTransactionClosed:
+	case sceptre.CodeConstraint, sceptre.CodeTransactionClosed, sceptre.CodeTransactionState:
 		status = 409
 	case sceptre.CodeNotFound:
 		status = 404

@@ -98,3 +98,45 @@ type BinaryExpr struct {
 }
 
 func (*BinaryExpr) exprNode() {}
+
+// BeginStmt is BEGIN [TRANSACTION | WORK].
+type BeginStmt struct{}
+
+func (*BeginStmt) statementNode() {}
+
+// CommitStmt is COMMIT [TRANSACTION | WORK].
+type CommitStmt struct{}
+
+func (*CommitStmt) statementNode() {}
+
+// RollbackStmt is ROLLBACK [TRANSACTION | WORK] [TO [SAVEPOINT] name]. An
+// empty Savepoint rolls back the whole transaction.
+type RollbackStmt struct {
+	Savepoint string
+}
+
+func (*RollbackStmt) statementNode() {}
+
+// SavepointStmt is SAVEPOINT name.
+type SavepointStmt struct {
+	Name string
+}
+
+func (*SavepointStmt) statementNode() {}
+
+// ReleaseStmt is RELEASE [SAVEPOINT] name.
+type ReleaseStmt struct {
+	Name string
+}
+
+func (*ReleaseStmt) statementNode() {}
+
+// IsTransactionControl reports whether stmt begins, ends, or marks a
+// transaction rather than reading or changing data.
+func IsTransactionControl(stmt Statement) bool {
+	switch stmt.(type) {
+	case *BeginStmt, *CommitStmt, *RollbackStmt, *SavepointStmt, *ReleaseStmt:
+		return true
+	}
+	return false
+}

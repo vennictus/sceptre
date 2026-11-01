@@ -7,8 +7,10 @@ codes match it exactly.
 
 ```bash
 sceptre serve app.db
-sceptre serve app.db --addr 127.0.0.1:7463 --max-rows 1000 --transaction-ttl 1m
+sceptre serve app.db --addr 127.0.0.1:7463 --max-rows 1000 --transaction-ttl 1m --durability full
 ```
+
+`--durability` is `full` (default) or `normal`; see [Durability](API.md#durability).
 
 The service is **local only** in this version. It is not a network database
 server: there are no user accounts, TLS, or remote access.
@@ -79,6 +81,9 @@ transaction are described above.
 - A transaction expires after `--transaction-ttl` (default 1 minute) and is rolled
   back, so an abandoned client cannot hold the database.
 - A failed statement leaves the transaction usable.
+- `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` work through `/api/tx/execute`.
+  `BEGIN`, `COMMIT` and `ROLLBACK` as SQL return `409 transaction_state`; use the
+  transaction routes.
 - A request that times out (15 seconds) or whose client disconnects rolls back
   its transaction.
 - An oversized response (over 8 MiB) returns `413 limit` and keeps the

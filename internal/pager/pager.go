@@ -222,8 +222,20 @@ func (p *Pager) WritePage(pageID uint64, page []byte) error {
 	return p.writeAt(page, p.pageOffset(pageID))
 }
 
-// PublishMeta writes the next meta page and makes it active in memory.
+// PublishMeta writes the next meta page, syncs it, and makes it active in memory.
 func (p *Pager) PublishMeta(meta Meta) error {
+	return p.publishMeta(meta, true)
+}
+
+// PublishMetaUnsynced writes the next meta page and makes it active in memory
+// without syncing it. The page becomes durable with the next Sync. A crash
+// before then reopens at the previous meta, which is intact as long as the
+// caller synced it before writing this one.
+func (p *Pager) PublishMetaUnsynced(meta Meta) error {
+	return p.publishMeta(meta, false)
+}
+
+func (p *Pager) publishMeta(meta Meta, sync bool) error {
 	if meta.PageSize != p.pageSize {
 		return ErrMetaPageSize
 	}
@@ -234,8 +246,10 @@ func (p *Pager) PublishMeta(meta Meta) error {
 	if err := p.writeMetaPage(slot, meta); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
 	}
-	if err := p.Sync(); err != nil {
-		return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
+	if sync {
+		if err := p.Sync(); err != nil {
+			return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
+		}
 	}
 
 	p.meta = meta

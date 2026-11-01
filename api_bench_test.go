@@ -45,3 +45,27 @@ func BenchmarkParallelSelect(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkAutocommitInsert measures one-row autocommit INSERTs under each
+// durability mode. Normal skips the meta page sync, one of two per commit.
+func BenchmarkAutocommitInsert(b *testing.B) {
+	for _, dur := range []Durability{DurabilityFull, DurabilityNormal} {
+		b.Run(dur.String(), func(b *testing.B) {
+			ctx := context.Background()
+			db, err := Open(filepath.Join(b.TempDir(), "db"), Options{Durability: dur})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Execute(ctx, "create table posts (id int64, body bytes, primary key (id))"); err != nil {
+				b.Fatal(err)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := db.Execute(ctx, "insert into posts (id, body) values (?, 'post body')", Int64(int64(i))); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

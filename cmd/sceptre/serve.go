@@ -23,6 +23,7 @@ type serveOptions struct {
 	path, addr string
 	rows       int
 	ttl        time.Duration
+	durability sceptre.Durability
 }
 
 func parseServe(args []string) (serveOptions, error) {
@@ -36,9 +37,15 @@ func parseServe(args []string) (serveOptions, error) {
 	flags.StringVar(&opts.addr, "addr", "127.0.0.1:7463", "loopback listener")
 	flags.IntVar(&opts.rows, "max-rows", 1000, "maximum SELECT output rows")
 	flags.DurationVar(&opts.ttl, "transaction-ttl", time.Minute, "transaction lifetime")
+	durability := flags.String("durability", "full", "full or normal")
 	if err := flags.Parse(args[1:]); err != nil {
 		return opts, err
 	}
+	d, err := sceptre.ParseDurability(*durability)
+	if err != nil {
+		return opts, errors.New("durability must be full or normal")
+	}
+	opts.durability = d
 	if flags.NArg() != 0 || opts.rows < 1 || opts.rows > 100000 || opts.ttl < time.Second || opts.ttl > 10*time.Minute {
 		return opts, errors.New("max-rows must be 1..100000 and transaction-ttl 1s..10m; unexpected arguments rejected")
 	}
@@ -79,7 +86,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer listener.Close()
-	db, err := sceptre.Open(opts.path, sceptre.Options{MaxRows: opts.rows})
+	db, err := sceptre.Open(opts.path, sceptre.Options{MaxRows: opts.rows, Durability: opts.durability})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

@@ -4,10 +4,12 @@ package sceptre
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/vennictus/sceptre/internal/kv"
 	"github.com/vennictus/sceptre/internal/sql"
+	"github.com/vennictus/sceptre/internal/storage"
 	"github.com/vennictus/sceptre/internal/table"
 	"github.com/vennictus/sceptre/internal/tx"
 )
@@ -40,13 +42,41 @@ var (
 	ErrRecoveryRequired = kv.ErrRecoveryRequired
 	// ErrReadOnly reports a write statement in a read-only transaction.
 	ErrReadOnly = kv.ErrReadOnly
+	// ErrTransactionState reports a transaction statement that does not fit
+	// the current state, such as BEGIN inside a transaction.
+	ErrTransactionState = errors.New("sceptre: statement does not fit the transaction state")
+	// ErrNoSavepoint reports ROLLBACK TO or RELEASE of a savepoint that is not open.
+	ErrNoSavepoint = errors.New("sceptre: no such savepoint")
 )
+
+// Durability says when a commit reaches durable storage.
+type Durability = storage.Durability
+
+const (
+	// DurabilityFull (the default) makes every commit durable before Commit
+	// returns.
+	DurabilityFull = storage.DurabilityFull
+	// DurabilityNormal skips one of a commit's two syncs. Power loss can lose
+	// the latest commit (never an earlier one) and never corrupts the file; a
+	// process crash loses nothing. DB.Sync and DB.Close make it durable.
+	DurabilityNormal = storage.DurabilityNormal
+)
+
+// ParseDurability accepts "full" and "normal".
+func ParseDurability(s string) (Durability, error) {
+	d, err := storage.ParseDurability(s)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrInvalidOptions, err)
+	}
+	return d, nil
+}
 
 // Options controls opening and the maximum SELECT rows returned per request.
 // MaxRows defaults to 1000; explicit SQL limits are capped to this bound.
 type Options struct {
-	PageSize uint32
-	MaxRows  int
+	PageSize   uint32
+	MaxRows    int
+	Durability Durability
 }
 
 // DB owns a database file. All public operations are safe for concurrent calls.
@@ -67,13 +97,13 @@ type DB struct {
 
 // Open acquires exclusive file ownership and recovers the latest valid state.
 func Open(path string, opts Options) (*DB, error) {
-	if opts.MaxRows < 0 || opts.MaxRows > 100000 {
+	if opts.MaxRows < 0 || opts.MaxRows > 100000 || opts.Durability > DurabilityNormal {
 		return nil, executionError(ErrInvalidOptions)
 	}
 	if opts.MaxRows == 0 {
 		opts.MaxRows = 1000
 	}
-	store, err := kv.Open(path, kv.Options{PageSize: opts.PageSize})
+	store, err := kv.Open(path, kv.Options{PageSize: opts.PageSize, Durability: opts.Durability})
 	if err != nil {
 		return nil, executionError(err)
 	}
@@ -138,6 +168,18 @@ func (db *DB) Close() error {
 	return executionError(db.store.Close())
 }
 
+// Sync makes every returned commit durable. Under DurabilityFull they already
+// are; under DurabilityNormal it syncs the latest commit. It waits for an open
+// transaction to finish.
+func (db *DB) Sync(ctx context.Context) error {
+	t, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer t.Rollback()
+	return executionError(db.store.Sync())
+}
+
 // enterRead registers a read operation, failing once the database is closed.
 func (db *DB) enterRead() error {
 	db.mu.Lock()
@@ -155,7 +197,10 @@ func (db *DB) enterRead() error {
 // failure, inspect Error.Code: committed and uncertain outcomes require
 // different handling.
 func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result, error) {
-	if isSelect(input, args) {
+	switch kindOf(input, args) {
+	case kindControl:
+		return Result{}, executionError(fmt.Errorf("%w: use a Session or DB.Begin for transaction statements", ErrTransactionState))
+	case kindQuery:
 		r, err := db.BeginRead(ctx)
 		if err != nil {
 			return Result{}, err
@@ -179,18 +224,31 @@ func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result,
 // parsed with its bindings as Execute parses it. DB.Execute runs such
 // statements on a snapshot without waiting for an open write transaction.
 // Input that does not parse is not a query.
-func IsQuery(input string, args ...Value) bool { return isSelect(input, args) }
+func IsQuery(input string, args ...Value) bool { return kindOf(input, args) == kindQuery }
 
-// isSelect reports whether input is a SELECT, parsing with its bindings as
-// execution does. Statements that fail to parse take the write path, which
-// reports the same error.
-func isSelect(input string, args []Value) bool {
+type statementKind int
+
+const (
+	kindWrite   statementKind = iota // anything else, including input that does not parse
+	kindQuery                        // SELECT
+	kindControl                      // BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE
+)
+
+// kindOf classifies input, parsing with its bindings as execution does.
+// Statements that fail to parse take the write path, which reports the same
+// error.
+func kindOf(input string, args []Value) statementKind {
 	stmt, err := sql.ParseParameters(input, args)
-	if err != nil {
-		return false
+	switch {
+	case err != nil:
+		return kindWrite
+	case sql.IsTransactionControl(stmt):
+		return kindControl
 	}
-	_, ok := stmt.(*sql.SelectStmt)
-	return ok
+	if _, ok := stmt.(*sql.SelectStmt); ok {
+		return kindQuery
+	}
+	return kindWrite
 }
 
 // Tables lists table definitions from the latest committed state, without
@@ -234,10 +292,16 @@ func (db *DB) Check(ctx context.Context) (CheckReport, error) {
 // are safe for concurrent calls, but their ordering is the order of execution.
 // Failed statements leave prior successful statements intact and Tx usable.
 type Tx struct {
-	db     *DB
-	inner  *tx.Tx
-	tables *table.DB
-	closed bool
+	db         *DB
+	inner      *tx.Tx
+	tables     *table.DB
+	closed     bool
+	savepoints []savepoint // open savepoints, innermost last
+}
+
+type savepoint struct {
+	name string
+	mark int
 }
 
 func (t *Tx) ready(ctx context.Context) error {
@@ -286,8 +350,66 @@ func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, 
 	if err != nil {
 		return Result{}, executionError(err)
 	}
+	if sql.IsTransactionControl(stmt) {
+		return Result{}, executionError(t.control(stmt))
+	}
 	r, err := sql.ExecuteStatement(t.tables, stmt)
 	return r, executionError(err)
+}
+
+// control runs SAVEPOINT, RELEASE and ROLLBACK TO. BEGIN, COMMIT and ROLLBACK
+// belong to the caller: Tx.Commit and Tx.Rollback, or a Session.
+func (t *Tx) control(stmt sql.Statement) error {
+	switch stmt := stmt.(type) {
+	case *sql.SavepointStmt:
+		mark, err := t.inner.Savepoint()
+		if err != nil {
+			return err
+		}
+		t.savepoints = append(t.savepoints, savepoint{stmt.Name, mark})
+		return nil
+	case *sql.ReleaseStmt:
+		i := t.findSavepoint(stmt.Name)
+		if i < 0 {
+			return fmt.Errorf("%w: %s", ErrNoSavepoint, stmt.Name)
+		}
+		return t.closeSavepoints(i)
+	case *sql.RollbackStmt:
+		if stmt.Savepoint == "" {
+			break
+		}
+		i := t.findSavepoint(stmt.Savepoint)
+		if i < 0 {
+			return fmt.Errorf("%w: %s", ErrNoSavepoint, stmt.Savepoint)
+		}
+		// Inner savepoints close; this one stays open, as in SQL.
+		if err := t.closeSavepoints(i + 1); err != nil {
+			return err
+		}
+		return t.inner.RollbackTo(t.savepoints[i].mark)
+	}
+	return fmt.Errorf("%w: a transaction is already open; use Tx.Commit or Tx.Rollback", ErrTransactionState)
+}
+
+// findSavepoint returns the innermost open savepoint with name, or -1.
+func (t *Tx) findSavepoint(name string) int {
+	for i := len(t.savepoints) - 1; i >= 0; i-- {
+		if t.savepoints[i].name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// closeSavepoints releases savepoint i and every one inside it.
+func (t *Tx) closeSavepoints(i int) error {
+	for len(t.savepoints) > i {
+		if err := t.inner.Release(); err != nil {
+			return err
+		}
+		t.savepoints = t.savepoints[:len(t.savepoints)-1]
+	}
+	return nil
 }
 
 func (t *Tx) Tables(ctx context.Context) ([]TableDef, error) {

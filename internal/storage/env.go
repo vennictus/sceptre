@@ -42,9 +42,48 @@ const DefaultCacheBytes = 64 << 20
 // directory lets tables and indexes get their own trees later.
 var dataTree = []byte("data")
 
+// Durability says when a commit reaches durable storage.
+type Durability uint8
+
+const (
+	// DurabilityFull syncs every commit before Commit returns: pages, then the
+	// meta page. A returned commit survives power loss.
+	DurabilityFull Durability = iota
+	// DurabilityNormal syncs pages but not the meta page; the next commit's page
+	// sync, Sync, or Close makes it durable. Power loss can lose the latest
+	// commit, never an earlier one, and never corrupts the file. Process
+	// crashes lose nothing.
+	DurabilityNormal
+)
+
+func (d Durability) String() string {
+	switch d {
+	case DurabilityFull:
+		return "full"
+	case DurabilityNormal:
+		return "normal"
+	}
+	return fmt.Sprintf("Durability(%d)", uint8(d))
+}
+
+// ErrInvalidDurability reports an unknown durability mode.
+var ErrInvalidDurability = errors.New("storage: unknown durability mode")
+
+// ParseDurability accepts "full" and "normal".
+func ParseDurability(s string) (Durability, error) {
+	switch s {
+	case "full":
+		return DurabilityFull, nil
+	case "normal":
+		return DurabilityNormal, nil
+	}
+	return 0, fmt.Errorf("%w %q (want full or normal)", ErrInvalidDurability, s)
+}
+
 type Options struct {
 	PageSize   uint32 // for new files; default pager.DefaultPageSize
 	CacheBytes int
+	Durability Durability
 	IO         *pager.IOHooks
 	// CommitHook runs after each commit stage; an error interrupts the commit
 	// there, as a crash would. For tests.
@@ -57,15 +96,17 @@ type Env struct {
 	l       layout
 	cache   *pageCache
 	hook    func(string) error
+	dur     Durability
 	writeMu sync.Mutex // one write transaction at a time
 
-	mu      sync.Mutex // guards everything below
-	state   snapshot
-	free    *freeIndex // committed free pages
-	chain   []uint64   // format v2 only: pages of the freelist chain, freed by the converting commit
-	readers map[*ReadTxn]uint64
-	failure error
-	closed  atomic.Bool // written under mu; read without it on hot paths
+	mu       sync.Mutex // guards everything below
+	unsynced bool       // DurabilityNormal: the active meta page is not yet synced
+	state    snapshot
+	free     *freeIndex // committed free pages
+	chain    []uint64   // format v2 only: pages of the freelist chain, freed by the converting commit
+	readers  map[*ReadTxn]uint64
+	failure  error
+	closed   atomic.Bool // written under mu; read without it on hot paths
 }
 
 // snapshot is one committed state.
@@ -85,6 +126,9 @@ func Open(path string, opts Options) (*Env, error) {
 		if _, err := newLayout(int(opts.PageSize)); err != nil {
 			return nil, err
 		}
+	}
+	if opts.Durability > DurabilityNormal {
+		return nil, ErrInvalidDurability
 	}
 	p, err := pager.Open(path, pager.Options{PageSize: opts.PageSize, Format: pager.FormatV3, IO: opts.IO})
 	if err != nil {
@@ -116,6 +160,7 @@ func openPager(p *pager.Pager, opts Options) (*Env, error) {
 		l:       l,
 		cache:   newPageCache(cacheBytes / l.pageSize),
 		hook:    opts.CommitHook,
+		dur:     opts.Durability,
 		readers: map[*ReadTxn]uint64{},
 	}
 	state := snapshot{txid: meta.Generation, dirRoot: meta.RootPage, pageCount: meta.PageCount}
@@ -165,7 +210,8 @@ func readRoot(src pageSource, l layout, dirRoot uint64, name []byte) (uint64, er
 	return binary.LittleEndian.Uint64(v), nil
 }
 
-// Close releases the file. Open transactions fail afterwards.
+// Close makes the latest commit durable and releases the file. Open
+// transactions fail afterwards.
 func (e *Env) Close() error {
 	e.mu.Lock()
 	if e.closed.Load() {
@@ -173,9 +219,38 @@ func (e *Env) Close() error {
 		return nil
 	}
 	e.closed.Store(true)
+	var err error
+	if e.unsynced && e.failure == nil {
+		err = e.p.Sync()
+		e.unsynced = false
+	}
 	e.mu.Unlock()
-	return e.p.Close()
+	return errors.Join(err, e.p.Close())
 }
+
+// Sync makes every returned commit durable. Under DurabilityFull they already
+// are. It waits for an open write transaction to finish.
+func (e *Env) Sync() error {
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.usable(); err != nil {
+		return err
+	}
+	if !e.unsynced {
+		return nil
+	}
+	if err := e.p.Sync(); err != nil {
+		e.failure = fmt.Errorf("%w: sync: %w", ErrRecoveryRequired, err)
+		return e.failure
+	}
+	e.unsynced = false
+	return nil
+}
+
+// Durability returns the environment's durability mode.
+func (e *Env) Durability() Durability { return e.dur }
 
 // Err reports an uncertain commit that requires reopening.
 func (e *Env) Err() error {
@@ -480,9 +555,22 @@ func (t *WriteTxn) Commit() error {
 	if err := t.stage(StagePagesWritten); err != nil {
 		return err
 	}
+	// This sync also makes the previous commit's meta page durable when it was
+	// published unsynced, so pages reused from here on are never needed by the
+	// state a crash would reopen.
 	if err := e.p.Sync(); err != nil {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.unsynced {
+			// A returned commit may not be durable; stop until reopen.
+			e.failure = fmt.Errorf("%w: sync: %w", ErrRecoveryRequired, err)
+			return e.failure
+		}
 		return err
 	}
+	e.mu.Lock()
+	e.unsynced = false
+	e.mu.Unlock()
 	if err := t.stage(StagePagesSynced); err != nil {
 		return err
 	}
@@ -496,7 +584,11 @@ func (t *WriteTxn) Commit() error {
 			return err
 		}
 	}
-	if err := e.p.PublishMeta(meta); err != nil {
+	publish := e.p.PublishMeta
+	if e.dur == DurabilityNormal {
+		publish = e.p.PublishMetaUnsynced
+	}
+	if err := publish(meta); err != nil {
 		e.mu.Lock()
 		e.failure = fmt.Errorf("%w: %w", ErrRecoveryRequired, err)
 		e.mu.Unlock()
@@ -507,6 +599,7 @@ func (t *WriteTxn) Commit() error {
 		e.cache.put(id, pages[id])
 	}
 	e.mu.Lock()
+	e.unsynced = e.dur == DurabilityNormal
 	e.state = snapshot{txid: e.p.Meta().Generation, dirRoot: dirRoot, dataRoot: t.root, freeRoot: freeRoot, pageCount: t.next}
 	e.free.install(edits, t.consumed)
 	e.chain = nil
