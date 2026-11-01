@@ -75,7 +75,7 @@ func executionError(err error) error {
 		code = CodeParameter
 	case errors.Is(err, sql.ErrParse):
 		code = CodeParse
-	case errors.Is(err, table.ErrRowExists), errors.Is(err, table.ErrTableExists), errors.Is(err, table.ErrIndexExists):
+	case errors.Is(err, table.ErrRowExists), errors.Is(err, table.ErrTableExists), errors.Is(err, table.ErrIndexExists), errors.Is(err, table.ErrUniqueViolation):
 		code = CodeConstraint
 	case errors.Is(err, table.ErrRowNotFound), errors.Is(err, table.ErrTableNotFound), errors.Is(err, table.ErrIndexNotFound):
 		code = CodeNotFound

@@ -78,6 +78,8 @@ type IndexDef struct {
 	Name    string   `json:"name"`
 	Columns []string `json:"columns"`
 	Prefix  uint32   `json:"prefix"`
+	// Unique rejects two rows with equal non-NULL values in all its columns.
+	Unique bool `json:"unique,omitempty"`
 }
 
 // Value stores one typed scalar value.
@@ -236,6 +238,7 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 		return err
 	}
 	defer scanner.Close()
+	claimed := map[string]struct{}{}
 	for scanner.Valid() {
 		row, err := scanner.Deref()
 		if err != nil {
@@ -244,6 +247,14 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 		key, err := encodeIndexKey(def, index, row)
 		if err != nil {
 			return err
+		}
+		if index.Unique {
+			if prefix, ok := uniquePrefix(def, index, row); ok {
+				if _, dup := claimed[string(prefix)]; dup {
+					return fmt.Errorf("%w: %s: existing rows have duplicate values", ErrUniqueViolation, index.Name)
+				}
+				claimed[string(prefix)] = struct{}{}
+			}
 		}
 		mutations = append(mutations, kv.Put(key, nil))
 		if err := scanner.Next(); err != nil {
@@ -378,6 +389,9 @@ func (db *DB) InsertMany(tableName string, records []Record) error {
 		}
 		mutations = append(mutations, puts...)
 	}
+	if err := db.checkUnique(def, records); err != nil {
+		return err
+	}
 	return db.store.Apply(mutations)
 }
 
@@ -412,6 +426,9 @@ func (db *DB) UpdateMany(tableName string, records []Record) error {
 		}
 		seen[string(key)] = struct{}{}
 		mutations = append(mutations, changes...)
+	}
+	if err := db.checkUnique(def, records); err != nil {
+		return err
 	}
 	return db.store.Apply(mutations)
 }
@@ -542,6 +559,9 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	}
 	mutations, err := db.rowMutations(def, record, mode)
 	if err != nil {
+		return err
+	}
+	if err := db.checkUnique(def, []Record{record}); err != nil {
 		return err
 	}
 	return db.store.Apply(mutations)
@@ -1078,6 +1098,7 @@ func cloneIndexDef(index IndexDef) IndexDef {
 		Name:    index.Name,
 		Prefix:  index.Prefix,
 		Columns: append([]string(nil), index.Columns...),
+		Unique:  index.Unique,
 	}
 }
 

@@ -166,10 +166,25 @@ func (db *DB) checkRows(def TableDef, expectedIndexKeys map[string]string) (int,
 	defer scanner.Close()
 
 	rows := 0
+	uniqueSeen := make(map[string]struct{})
 	for scanner.Valid() {
 		row, err := scanner.Deref()
 		if err != nil {
 			return 0, nil, err
+		}
+		for _, index := range def.Indexes {
+			if !index.Unique {
+				continue
+			}
+			if prefix, ok := uniquePrefix(def, index, row); ok {
+				if _, dup := uniqueSeen[string(prefix)]; dup {
+					issues = append(issues, CheckIssue{
+						Code:   "unique_violation",
+						Detail: fmt.Sprintf("table %s index %s row %s duplicates another row", def.Name, index.Name, recordString(def.Columns, row)),
+					})
+				}
+				uniqueSeen[string(prefix)] = struct{}{}
+			}
 		}
 		if err := validateFullRecord(def, row); err != nil {
 			issues = append(issues, CheckIssue{
