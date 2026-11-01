@@ -254,7 +254,7 @@ func encodedIndexValueLen(def TableDef, index IndexDef, key []byte) int {
 	consumed := 0
 	for _, name := range index.Columns {
 		valueType, _ := columnType(def, name)
-		_, n, err := consumeEncodedValue(remaining, valueType)
+		_, n, err := consumeColumnValue(remaining, valueType, def.tagged())
 		if err != nil {
 			return len(remaining)
 		}
@@ -352,6 +352,8 @@ func valueString(value Value) string {
 		return fmt.Sprintf("%d", value.I64)
 	case TypeBytes, TypeText:
 		return fmt.Sprintf("%q", string(value.Bytes))
+	case TypeNull:
+		return "NULL"
 	default:
 		return "<invalid>"
 	}

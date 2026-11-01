@@ -68,3 +68,39 @@ func consumeEncodedValue(src []byte, valueType Type) (Value, int, error) {
 		return Value{}, 0, ErrInvalidValue
 	}
 }
+
+// Tags for column values in tagged row formats. NULL sorts before any value.
+const (
+	tagNull  byte = 0x00
+	tagValue byte = 0x01
+)
+
+// appendColumnValue appends a non-key column value. Tagged formats mark each
+// value as NULL or present; the legacy format stores the value alone.
+func appendColumnValue(dst []byte, value Value, tagged bool) []byte {
+	if !tagged {
+		return appendEncodedValue(dst, value)
+	}
+	if value.Type == TypeNull {
+		return append(dst, tagNull)
+	}
+	return appendEncodedValue(append(dst, tagValue), value)
+}
+
+// consumeColumnValue reads one value written by appendColumnValue.
+func consumeColumnValue(src []byte, valueType Type, tagged bool) (Value, int, error) {
+	if !tagged {
+		return consumeEncodedValue(src, valueType)
+	}
+	if len(src) == 0 {
+		return Value{}, 0, ErrCorruptRecord
+	}
+	switch src[0] {
+	case tagNull:
+		return NullValue(), 1, nil
+	case tagValue:
+		v, n, err := consumeEncodedValue(src[1:], valueType)
+		return v, n + 1, err
+	}
+	return Value{}, 0, ErrCorruptRecord
+}

@@ -17,6 +17,13 @@ const (
 	TypeBytes Type = 1
 	TypeInt64 Type = 2
 	TypeText  Type = 3 // UTF-8; stored and ordered like bytes
+	// TypeNull is the type of a NULL value. It is not a column type.
+	TypeNull Type = 4
+
+	// RowFormatTagged stores each non-key column value with a NULL/present tag,
+	// in rows and in secondary index keys, and reads missing trailing columns
+	// as NULL. Tables created before it use format 0: untagged, no NULLs.
+	RowFormatTagged uint8 = 1
 
 	rowKeyPrefix       byte   = 0x10
 	indexKeyPrefix     byte   = 0x11
@@ -49,8 +56,9 @@ type Options struct {
 
 // Column defines one named table column.
 type Column struct {
-	Name string `json:"name"`
-	Type Type   `json:"type"`
+	Name     string `json:"name"`
+	Type     Type   `json:"type"`
+	Nullable bool   `json:"nullable,omitempty"`
 }
 
 // TableDef is the persisted schema for a table.
@@ -60,7 +68,10 @@ type TableDef struct {
 	PrimaryKey []string   `json:"primary_key"`
 	Prefix     uint32     `json:"prefix"`
 	Indexes    []IndexDef `json:"indexes,omitempty"`
+	RowFormat  uint8      `json:"row_format,omitempty"`
 }
+
+func (def TableDef) tagged() bool { return def.RowFormat >= RowFormatTagged }
 
 // IndexDef is the persisted schema for a secondary index.
 type IndexDef struct {
@@ -122,6 +133,12 @@ func BytesValue(value []byte) Value {
 }
 
 // Int64Value constructs a signed integer table value.
+// NullValue returns the SQL NULL.
+func NullValue() Value { return Value{Type: TypeNull} }
+
+// IsNull reports whether v is NULL.
+func (v Value) IsNull() bool { return v.Type == TypeNull }
+
 // TextValue returns a text value. It must be valid UTF-8 to be stored.
 func TextValue(value string) Value {
 	return Value{Type: TypeText, Bytes: []byte(value)}
@@ -145,6 +162,7 @@ func (db *DB) CreateTable(def TableDef) error {
 	if db == nil || db.store == nil {
 		return ErrTableNotFound
 	}
+	def.RowFormat = RowFormatTagged
 	if err := validateTableDef(def, false); err != nil {
 		return err
 	}
@@ -653,10 +671,16 @@ func validateTableDef(def TableDef, requirePrefix bool) error {
 	if requirePrefix && def.Prefix == 0 {
 		return ErrInvalidTableDef
 	}
+	if def.RowFormat > RowFormatTagged {
+		return ErrInvalidTableDef
+	}
 
 	columns := make(map[string]Type, len(def.Columns))
 	for _, column := range def.Columns {
 		if column.Name == "" || !validType(column.Type) {
+			return ErrInvalidTableDef
+		}
+		if column.Nullable && (!def.tagged() || isPrimaryKey(def, column.Name)) {
 			return ErrInvalidTableDef
 		}
 		if _, exists := columns[column.Name]; exists {
@@ -739,7 +763,7 @@ func validateFullRecord(def TableDef, record Record) error {
 		if !ok {
 			return ErrInvalidRecord
 		}
-		if !valueMatchesType(value, column.Type) {
+		if !valueAllowed(value, column) {
 			return ErrInvalidValue
 		}
 	}
@@ -815,7 +839,7 @@ func encodeRowValue(def TableDef, record Record) ([]byte, error) {
 		if isPrimaryKey(def, column.Name) {
 			continue
 		}
-		out = appendEncodedValue(out, record.Values[column.Name])
+		out = appendColumnValue(out, record.Values[column.Name], def.tagged())
 	}
 	return out, nil
 }
@@ -831,7 +855,12 @@ func decodeRowValue(def TableDef, key Record, data []byte) (Record, error) {
 		if isPrimaryKey(def, column.Name) {
 			continue
 		}
-		value, consumed, err := consumeEncodedValue(remaining, column.Type)
+		if len(remaining) == 0 && column.Nullable {
+			// Columns added after the row was written read as NULL.
+			values[column.Name] = NullValue()
+			continue
+		}
+		value, consumed, err := consumeColumnValue(remaining, column.Type, def.tagged())
 		if err != nil {
 			return Record{}, err
 		}
@@ -880,11 +909,11 @@ func encodeIndexKey(def TableDef, index IndexDef, record Record) ([]byte, error)
 	out := indexKeyStart(index)
 	for _, name := range index.Columns {
 		value := record.Values[name]
-		valueType, _ := columnType(def, name)
-		if !valueMatchesType(value, valueType) {
+		column, _ := findColumn(def, name)
+		if !valueAllowed(value, column) {
 			return nil, ErrInvalidValue
 		}
-		out = appendEncodedValue(out, value)
+		out = appendColumnValue(out, value, def.tagged())
 	}
 	for _, name := range def.PrimaryKey {
 		out = appendEncodedValue(out, record.Values[name])
@@ -899,7 +928,7 @@ func encodeIndexLookupPrefix(def TableDef, index IndexDef, values Record) ([]byt
 
 	out := indexKeyStart(index)
 	for _, name := range index.Columns {
-		out = appendEncodedValue(out, values.Values[name])
+		out = appendColumnValue(out, values.Values[name], def.tagged())
 	}
 	return out, nil
 }
@@ -976,6 +1005,23 @@ func (t Type) String() string {
 // HasBytes reports whether values of the type keep their data in Value.Bytes.
 func (t Type) HasBytes() bool { return t == TypeBytes || t == TypeText }
 
+// valueAllowed reports whether value may be stored in column.
+func valueAllowed(value Value, column Column) bool {
+	if value.Type == TypeNull {
+		return column.Nullable
+	}
+	return valueMatchesType(value, column.Type)
+}
+
+func findColumn(def TableDef, name string) (Column, bool) {
+	for _, column := range def.Columns {
+		if column.Name == name {
+			return column, true
+		}
+	}
+	return Column{}, false
+}
+
 func columnType(def TableDef, name string) (Type, bool) {
 	for _, column := range def.Columns {
 		if column.Name == name {
@@ -1019,6 +1065,7 @@ func cloneTableDef(def TableDef) TableDef {
 		Columns:    append([]Column(nil), def.Columns...),
 		PrimaryKey: append([]string(nil), def.PrimaryKey...),
 		Indexes:    make([]IndexDef, 0, len(def.Indexes)),
+		RowFormat:  def.RowFormat,
 	}
 	for _, index := range def.Indexes {
 		out.Indexes = append(out.Indexes, cloneIndexDef(index))
