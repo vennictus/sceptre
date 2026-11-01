@@ -47,7 +47,7 @@ matching no rows does not publish a new generation.
 
 | Outcome | Meaning and required action |
 | --- | --- |
-| `nil` error | Data pages and new metadata have both completed OS file sync; the complete batch is visible. |
+| `nil` error | Under `DurabilityFull` (default), data pages and new metadata have both completed OS file sync; the complete batch is visible. Under `DurabilityNormal`, data pages are synced and the metadata is written but not synced: power loss before the next sync can lose this commit only. |
 | Error before metadata publication | The write transaction is discarded; nothing was published and the previous generation remains authoritative. |
 | `kv.ErrCommitCommitted` | The post-publication test hook reported an error after the complete batch committed; do not replay it as an aborted operation. |
 | `kv.ErrRecoveryRequired` | A metadata write or sync had an uncertain result; close and reopen before new operations, then reconcile application state before retrying. |
@@ -67,7 +67,10 @@ through power loss is not an established guarantee.
 
 ## Transactions and snapshots
 
-SQL text does not expose BEGIN, COMMIT, or ROLLBACK. The public Go API exposes
+`Session` runs BEGIN, COMMIT and ROLLBACK as SQL over the same transactions;
+`DB.Execute` rejects them with `transaction_state`. SAVEPOINT, RELEASE and
+ROLLBACK TO work inside a transaction: ROLLBACK TO undoes the buffered KV writes
+made after the savepoint, schema changes included. The public Go API exposes
 Begin, Execute, Commit, and Rollback. Table/SQL execution within a public transaction
 uses transaction-aware KV reads, scans, and atomic statement staging. Schema and
 index backfill participate alongside rows. Pending changes are visible to that
@@ -170,7 +173,11 @@ Committed pages are immutable. A commit copies each page it changes to a new
 page ID and rewrites the path to the root. It writes the changed data pages, the
 changed free tree records (one for the pages it frees, and trims or deletes the
 records it reuses pages from), and the directory, then syncs, publishes the next
-meta page, and syncs again. The meta page is the visibility point. Editing the
+meta page, and syncs again (under `DurabilityNormal` the second sync is skipped:
+the next commit's page sync, `Sync`, or `Close` covers it, and a page sync
+failure while a meta page is unsynced requires reopening). The meta page is the
+visibility point. Page reuse keeps the previous generation intact, which is what
+a power loss reopens under `DurabilityNormal`. Editing the
 free tree is itself copy-on-write, so the commit re-applies its free tree and
 directory edits until a round changes nothing. Pages touched once are private to
 the transaction, so this settles in a few rounds, and the number of rounds is
