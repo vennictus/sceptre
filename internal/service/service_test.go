@@ -219,7 +219,7 @@ func TestSchemaAndExplainWireShapes(t *testing.T) {
 		t.Fatalf("schema: %d %+v", r.Status, r.Body)
 	}
 	s := r.Body.Schema[0]
-	if s.Name != "users" || len(s.Columns) != 3 || s.Columns[1] != (column{"name", "bytes"}) || len(s.Indexes) != 1 || s.Indexes[0].Name != "users_age" {
+	if s.Name != "users" || len(s.Columns) != 3 || s.Columns[1] != (column{"name", "bytes", true}) || len(s.Indexes) != 1 || s.Indexes[0].Name != "users_age" {
 		t.Fatalf("schema shape: %+v", s)
 	}
 	r = f.sql("/api/explain", "SELECT * FROM users WHERE age = 42 LIMIT 5", nil)
@@ -467,5 +467,23 @@ func TestTextValuesTravelAsPlainStrings(t *testing.T) {
 	}
 	if r := f.call("/api/schema", "{}", nil); r.Body.Schema[0].Columns[1].Type != "text" {
 		t.Fatalf("schema column type = %+v", r.Body.Schema)
+	}
+}
+
+func TestNullValuesOnTheWire(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.mustSQL("CREATE TABLE notes (id int64, body text, PRIMARY KEY (id))")
+	if r := f.call("/api/execute", `{"sql":"INSERT INTO notes (id, body) VALUES (1, ?)","params":[{"type":"null","value":""}]}`, nil); r.Status != 200 {
+		t.Fatalf("insert null binding: %d %+v", r.Status, r.Body.Error)
+	}
+	r := f.sql("/api/execute", "SELECT body FROM notes WHERE body IS NULL", nil)
+	if len(r.Body.Result.Rows) != 1 || r.Body.Result.Rows[0][0].Type != "null" {
+		t.Fatalf("null result = %+v", r.Body.Result)
+	}
+	if r := f.call("/api/schema", "{}", nil); !r.Body.Schema[0].Columns[1].Nullable || r.Body.Schema[0].Columns[0].Nullable {
+		t.Fatalf("schema nullability = %+v", r.Body.Schema[0].Columns)
+	}
+	if r := f.call("/api/execute", `{"sql":"SELECT * FROM notes WHERE id = ?","params":[{"type":"null","value":"x"}]}`, nil); r.Status != 400 {
+		t.Fatalf("null binding with a value: %d", r.Status)
 	}
 }

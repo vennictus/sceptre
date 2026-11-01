@@ -29,13 +29,18 @@ func (v Scalar) decode() (sceptre.Value, error) {
 			return sceptre.Value{}, fmt.Errorf("invalid base64 binding")
 		}
 		return sceptre.Bytes(b), nil
+	case "null":
+		if v.Value != "" {
+			return sceptre.Value{}, fmt.Errorf("null binding takes no value")
+		}
+		return sceptre.Null(), nil
 	case "text":
 		if !utf8.ValidString(v.Value) {
 			return sceptre.Value{}, fmt.Errorf("invalid UTF-8 text binding")
 		}
 		return sceptre.Text(v.Value), nil
 	default:
-		return sceptre.Value{}, fmt.Errorf("binding type must be int64, bytes or text")
+		return sceptre.Value{}, fmt.Errorf("binding type must be int64, bytes, text or null")
 	}
 }
 
@@ -46,6 +51,8 @@ func scalar(v sceptre.Value) Scalar {
 		return Scalar{Type: "int64", Value: strconv.FormatInt(v.I64, 10)}
 	case sceptre.TypeText:
 		return Scalar{Type: "text", Value: string(v.Bytes)}
+	case sceptre.TypeNull:
+		return Scalar{Type: "null"}
 	}
 	return Scalar{Type: "bytes", Value: base64.StdEncoding.EncodeToString(v.Bytes)}
 }
@@ -91,8 +98,9 @@ func resultWire(r sceptre.Result) *result {
 }
 
 type column struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Nullable bool   `json:"nullable"`
 }
 type schema struct {
 	Name       string             `json:"name"`
@@ -109,7 +117,7 @@ func schemas(defs []sceptre.TableDef) []schema {
 			out[i].Indexes = []sceptre.IndexDef{}
 		}
 		for j, c := range d.Columns {
-			out[i].Columns[j] = column{Name: c.Name, Type: c.Type.String()}
+			out[i].Columns[j] = column{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
 		}
 	}
 	return out
