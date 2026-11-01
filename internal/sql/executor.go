@@ -67,6 +67,15 @@ func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
 	if err := db.CreateTable(def); err != nil {
 		return Result{}, err
 	}
+	for _, column := range stmt.Columns {
+		if !column.Unique {
+			continue
+		}
+		index := table.IndexDef{Name: stmt.Name + "_" + column.Name + "_key", Columns: []string{column.Name}, Unique: true}
+		if err := db.CreateIndex(stmt.Name, index); err != nil {
+			return Result{}, err
+		}
+	}
 	return Result{}, nil
 }
 
@@ -74,6 +83,7 @@ func executeCreateIndex(db *table.DB, stmt *CreateIndexStmt) (Result, error) {
 	err := db.CreateIndex(stmt.Table, table.IndexDef{
 		Name:    stmt.Name,
 		Columns: append([]string(nil), stmt.Columns...),
+		Unique:  stmt.Unique,
 	})
 	return Result{}, err
 }

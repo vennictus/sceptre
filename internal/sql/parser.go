@@ -44,6 +44,17 @@ func (p *parser) parseStatement() (Statement, error) {
 		if p.matchKeyword("index") {
 			return p.parseCreateIndex()
 		}
+		if p.matchKeyword("unique") {
+			if err := p.expectKeyword("index"); err != nil {
+				return nil, err
+			}
+			stmt, err := p.parseCreateIndex()
+			if err != nil {
+				return nil, err
+			}
+			stmt.(*CreateIndexStmt).Unique = true
+			return stmt, nil
+		}
 	case p.matchKeyword("insert"):
 		return p.parseInsert()
 	case p.matchKeyword("select"):
@@ -124,13 +135,8 @@ func (p *parser) parseCreateTable() (Statement, error) {
 				return nil, err
 			}
 			column := ColumnDef{Name: columnName, Type: strings.ToLower(typeName)}
-			switch {
-			case p.matchKeyword("not"):
-				if err := p.expectKeyword("null"); err != nil {
-					return nil, err
-				}
-				column.NotNull = true
-			case p.matchKeyword("null"):
+			if err := p.parseColumnConstraints(&column); err != nil {
+				return nil, err
 			}
 			columns = append(columns, column)
 		}
@@ -144,6 +150,24 @@ func (p *parser) parseCreateTable() (Statement, error) {
 		return nil, err
 	}
 	return &CreateTableStmt{Name: name, Columns: columns, PrimaryKey: primaryKey}, nil
+}
+
+// parseColumnConstraints reads NOT NULL, NULL and UNIQUE in any order.
+func (p *parser) parseColumnConstraints(column *ColumnDef) error {
+	for {
+		switch {
+		case p.matchKeyword("not"):
+			if err := p.expectKeyword("null"); err != nil {
+				return err
+			}
+			column.NotNull = true
+		case p.matchKeyword("null"):
+		case p.matchKeyword("unique"):
+			column.Unique = true
+		default:
+			return nil
+		}
+	}
 }
 
 func (p *parser) parseCreateIndex() (Statement, error) {

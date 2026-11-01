@@ -9,6 +9,7 @@ type ColumnDef struct {
 	Name    string
 	Type    string
 	NotNull bool
+	Unique  bool
 }
 
 type CreateTableStmt struct {
@@ -23,6 +24,7 @@ type CreateIndexStmt struct {
 	Name    string
 	Table   string
 	Columns []string
+	Unique  bool
 }
 
 func (*CreateIndexStmt) statementNode() {}
