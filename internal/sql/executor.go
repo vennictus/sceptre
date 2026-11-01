@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/vennictus/sceptre/internal/table"
 )
@@ -290,7 +291,8 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 }
 
 func compareValues(left, right table.Value, op string) (bool, error) {
-	if left.Type != right.Type {
+	// A string literal evaluates as bytes; validation allows it against text.
+	if left.Type != right.Type && !(left.Type.HasBytes() && right.Type.HasBytes()) {
 		return false, fmt.Errorf("%w: type mismatch", ErrExec)
 	}
 	var cmp int
@@ -302,7 +304,7 @@ func compareValues(left, right table.Value, op string) (bool, error) {
 		case left.I64 > right.I64:
 			cmp = 1
 		}
-	case table.TypeBytes:
+	case table.TypeBytes, table.TypeText:
 		cmp = bytes.Compare(left.Bytes, right.Bytes)
 	default:
 		return false, fmt.Errorf("%w: unsupported value type", ErrExec)
@@ -348,6 +350,14 @@ func literalToValue(literal Literal, valueType table.Type) (table.Value, error) 
 			return table.Value{}, fmt.Errorf("%w: expected bytes literal", ErrExec)
 		}
 		return table.BytesValue([]byte(literal.String)), nil
+	case table.TypeText:
+		if literal.Kind != LiteralString {
+			return table.Value{}, fmt.Errorf("%w: expected text literal", ErrExec)
+		}
+		if !utf8.ValidString(literal.String) {
+			return table.Value{}, fmt.Errorf("%w: text must be valid UTF-8", table.ErrInvalidValue)
+		}
+		return table.TextValue(literal.String), nil
 	default:
 		return table.Value{}, fmt.Errorf("%w: unsupported column type", ErrExec)
 	}
@@ -355,8 +365,10 @@ func literalToValue(literal Literal, valueType table.Type) (table.Value, error) 
 
 func sqlType(name string) (table.Type, error) {
 	switch name {
-	case "bytes", "string", "text":
+	case "bytes", "blob":
 		return table.TypeBytes, nil
+	case "text", "string", "varchar":
+		return table.TypeText, nil
 	case "int64", "int":
 		return table.TypeInt64, nil
 	default:
@@ -400,7 +412,7 @@ func projectRow(row table.Record, columns []string) []table.Value {
 func candidateRows(db *table.DB, def table.TableDef, plan Plan) ([]table.Record, error) {
 	switch plan.Access {
 	case AccessPrimaryKeyLookup:
-		key, err := lookupRecord(plan.Lookup)
+		key, err := lookupRecord(def, plan.Lookup)
 		if err != nil {
 			return nil, err
 		}
@@ -413,7 +425,7 @@ func candidateRows(db *table.DB, def table.TableDef, plan Plan) ([]table.Record,
 		}
 		return []table.Record{row}, nil
 	case AccessSecondaryIndexLookup:
-		key, err := lookupRecord(plan.Lookup)
+		key, err := lookupRecord(def, plan.Lookup)
 		if err != nil {
 			return nil, err
 		}
@@ -449,27 +461,42 @@ func scanRows(db *table.DB, tableName string, bounds table.ScanBounds) ([]table.
 	return rows, nil
 }
 
-func lookupRecord(conditions []Condition) (table.Record, error) {
+func lookupRecord(def table.TableDef, conditions []Condition) (table.Record, error) {
 	values := make(map[string]table.Value, len(conditions))
 	for _, condition := range conditions {
-		values[condition.Column] = literalUntyped(condition.Literal)
+		value, err := conditionValue(def, condition)
+		if err != nil {
+			return table.Record{}, err
+		}
+		values[condition.Column] = value
 	}
 	return table.NewRecord(values), nil
+}
+
+// conditionValue converts a condition's literal to its column's type.
+func conditionValue(def table.TableDef, condition Condition) (table.Value, error) {
+	typ, ok := columnType(def, condition.Column)
+	if !ok {
+		return table.Value{}, fmt.Errorf("%w: unknown column %s", ErrExec, condition.Column)
+	}
+	return literalToValue(condition.Literal, typ)
 }
 
 func scanBoundsFromPlan(def table.TableDef, plan Plan) (table.ScanBounds, error) {
 	var bounds table.ScanBounds
 	if plan.Lower != nil {
-		bounds.Lower = &table.Bound{
-			Key:       table.NewRecord(map[string]table.Value{plan.Lower.Column: literalUntyped(plan.Lower.Literal)}),
-			Inclusive: plan.Lower.Op == ">=",
+		v, err := conditionValue(def, *plan.Lower)
+		if err != nil {
+			return bounds, err
 		}
+		bounds.Lower = &table.Bound{Key: table.NewRecord(map[string]table.Value{plan.Lower.Column: v}), Inclusive: plan.Lower.Op == ">="}
 	}
 	if plan.Upper != nil {
-		bounds.Upper = &table.Bound{
-			Key:       table.NewRecord(map[string]table.Value{plan.Upper.Column: literalUntyped(plan.Upper.Literal)}),
-			Inclusive: plan.Upper.Op == "<=",
+		v, err := conditionValue(def, *plan.Upper)
+		if err != nil {
+			return bounds, err
 		}
+		bounds.Upper = &table.Bound{Key: table.NewRecord(map[string]table.Value{plan.Upper.Column: v}), Inclusive: plan.Upper.Op == "<="}
 	}
 	return bounds, nil
 }

@@ -11,6 +11,20 @@ import (
 type expressionType struct {
 	value   table.Type
 	boolean bool
+	str     bool // an untyped string literal: compares with bytes or text
+}
+
+// comparable reports whether two value expressions may be compared.
+func comparable(left, right expressionType) bool {
+	switch {
+	case left.value == right.value:
+		return true
+	case left.str:
+		return right.value.HasBytes()
+	case right.str:
+		return left.value.HasBytes()
+	}
+	return false
 }
 
 func validateWhere(def table.TableDef, expr Expr) error {
@@ -46,7 +60,7 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 		case LiteralInt:
 			return expressionType{value: table.TypeInt64}, nil
 		case LiteralString:
-			return expressionType{value: table.TypeBytes}, nil
+			return expressionType{value: table.TypeBytes, str: true}, nil
 		}
 	case *BinaryExpr:
 		if expr == nil {
@@ -69,7 +83,7 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 			if left.boolean || right.boolean {
 				return expressionType{}, fmt.Errorf("%w: comparison operands must be values", ErrExec)
 			}
-			if left.value != right.value {
+			if !comparable(left, right) {
 				return expressionType{}, fmt.Errorf("%w: type mismatch", ErrExec)
 			}
 		default:

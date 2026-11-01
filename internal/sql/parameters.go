@@ -31,7 +31,7 @@ func ParseParameters(input string, values []table.Value) (Statement, error) {
 		switch v.Type {
 		case table.TypeInt64:
 			tokens[i] = token{kind: tokenNumber, text: strconv.FormatInt(v.I64, 10)}
-		case table.TypeBytes:
+		case table.TypeBytes, table.TypeText:
 			tokens[i] = token{kind: tokenString, text: string(v.Bytes)}
 		default:
 			return nil, fmt.Errorf("%w: binding %d has unsupported type", ErrParameter, n)

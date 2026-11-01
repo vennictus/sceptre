@@ -329,7 +329,7 @@ func compareLowerBound(valueType table.Type, left, right Condition) int {
 		case leftValue.I64 > rightValue.I64:
 			return 1
 		}
-	case table.TypeBytes:
+	case table.TypeBytes, table.TypeText:
 		return bytes.Compare(leftValue.Bytes, rightValue.Bytes)
 	}
 
@@ -359,7 +359,7 @@ func compareUpperBound(valueType table.Type, left, right Condition) int {
 		case leftValue.I64 > rightValue.I64:
 			return 1
 		}
-	case table.TypeBytes:
+	case table.TypeBytes, table.TypeText:
 		return bytes.Compare(leftValue.Bytes, rightValue.Bytes)
 	}
 
