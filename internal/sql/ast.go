@@ -6,8 +6,9 @@ type Statement interface {
 }
 
 type ColumnDef struct {
-	Name string
-	Type string
+	Name    string
+	Type    string
+	NotNull bool
 }
 
 type CreateTableStmt struct {
@@ -81,6 +82,7 @@ type LiteralKind int
 const (
 	LiteralInt LiteralKind = iota + 1
 	LiteralString
+	LiteralNull
 )
 
 type Literal struct {
@@ -98,6 +100,14 @@ type BinaryExpr struct {
 }
 
 func (*BinaryExpr) exprNode() {}
+
+// IsNullExpr is expr IS NULL, or IS NOT NULL when Not is set.
+type IsNullExpr struct {
+	Expr Expr
+	Not  bool
+}
+
+func (*IsNullExpr) exprNode() {}
 
 // BeginStmt is BEGIN [TRANSACTION | WORK].
 type BeginStmt struct{}

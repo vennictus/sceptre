@@ -25,6 +25,7 @@ const (
 	tokenGreater
 	tokenGreaterEqual
 	tokenParameter
+	tokenNull // a NULL binding; the NULL keyword lexes as an identifier
 )
 
 type token struct {

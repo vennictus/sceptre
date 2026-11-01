@@ -180,9 +180,11 @@ func normalizeCondition(expr Expr) (Condition, bool) {
 	return Condition{}, false
 }
 
+// exprLiteral returns a literal usable as an access-path bound. NULL is not:
+// a comparison with NULL is never true, so the residual filter handles it.
 func exprLiteral(expr Expr) (Literal, bool) {
 	literal, ok := expr.(*Literal)
-	if !ok {
+	if !ok || literal.Kind == LiteralNull {
 		return Literal{}, false
 	}
 	return *literal, true
@@ -414,6 +416,11 @@ func FormatExpr(expr Expr) string {
 			return fmt.Sprintf("(%s %s %s)", left, strings.ToUpper(expr.Op), right)
 		}
 		return fmt.Sprintf("%s %s %s", left, expr.Op, right)
+	case *IsNullExpr:
+		if expr.Not {
+			return FormatExpr(expr.Expr) + " IS NOT NULL"
+		}
+		return FormatExpr(expr.Expr) + " IS NULL"
 	default:
 		return "<expr>"
 	}
@@ -425,6 +432,8 @@ func FormatLiteral(literal Literal) string {
 		return fmt.Sprintf("%d", literal.Int)
 	case LiteralString:
 		return fmt.Sprintf("'%s'", strings.ReplaceAll(literal.String, "'", "''"))
+	case LiteralNull:
+		return "NULL"
 	default:
 		return "<literal>"
 	}

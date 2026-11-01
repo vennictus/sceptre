@@ -123,7 +123,16 @@ func (p *parser) parseCreateTable() (Statement, error) {
 			if err != nil {
 				return nil, err
 			}
-			columns = append(columns, ColumnDef{Name: columnName, Type: strings.ToLower(typeName)})
+			column := ColumnDef{Name: columnName, Type: strings.ToLower(typeName)}
+			switch {
+			case p.matchKeyword("not"):
+				if err := p.expectKeyword("null"); err != nil {
+					return nil, err
+				}
+				column.NotNull = true
+			case p.matchKeyword("null"):
+			}
+			columns = append(columns, column)
 		}
 
 		if p.match(tokenComma) {
@@ -325,6 +334,13 @@ func (p *parser) parseComparison() (Expr, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.matchKeyword("is") {
+		not := p.matchKeyword("not")
+		if err := p.expectKeyword("null"); err != nil {
+			return nil, err
+		}
+		return &IsNullExpr{Expr: left, Not: not}, nil
+	}
 	if !p.isComparison() {
 		return left, nil
 	}
@@ -347,7 +363,7 @@ func (p *parser) parsePrimary() (Expr, error) {
 		}
 		return expr, nil
 	}
-	if p.at(tokenIdent) {
+	if p.at(tokenIdent) && !p.atNull() {
 		name := p.next().text
 		return &IdentExpr{Name: name}, nil
 	}
@@ -421,8 +437,18 @@ func (p *parser) expectLiteral() (Literal, error) {
 	case tokenString:
 		return Literal{Kind: LiteralString, String: p.next().text}, nil
 	default:
+		if p.atNull() {
+			p.next()
+			return Literal{Kind: LiteralNull}, nil
+		}
 		return Literal{}, p.errorf("expected literal")
 	}
+}
+
+// atNull reports whether the next token is NULL: the keyword or a binding.
+func (p *parser) atNull() bool {
+	tok := p.peek()
+	return tok.kind == tokenNull || tok.kind == tokenIdent && strings.EqualFold(tok.text, "null")
 }
 
 func (p *parser) expectIdent() (string, error) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/vennictus/sceptre/internal/table"
@@ -59,7 +60,9 @@ func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		def.Columns = append(def.Columns, table.Column{Name: column.Name, Type: valueType})
+		// Columns accept NULL unless NOT NULL or part of the primary key.
+		nullable := !column.NotNull && !slices.Contains(stmt.PrimaryKey, column.Name)
+		def.Columns = append(def.Columns, table.Column{Name: column.Name, Type: valueType, Nullable: nullable})
 	}
 	if err := db.CreateTable(def); err != nil {
 		return Result{}, err
@@ -101,6 +104,15 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 			return Result{}, err
 		}
 		values[column] = value
+	}
+	for _, column := range def.Columns {
+		if _, ok := values[column.Name]; ok {
+			continue
+		}
+		if !column.Nullable {
+			return Result{}, fmt.Errorf("%w: column %s needs a value", ErrExec, column.Name)
+		}
+		values[column.Name] = table.NullValue()
 	}
 	if err := db.Insert(stmt.Table, table.NewRecord(values)); err != nil {
 		return Result{}, err
@@ -224,12 +236,16 @@ func executeDelete(db *table.DB, stmt *DeleteStmt) (Result, error) {
 	return Result{RowsAffected: removed}, nil
 }
 
+// evalResult is a value or a three-valued boolean: true, false, or unknown
+// (any comparison involving NULL).
 type evalResult struct {
-	value  table.Value
-	bool   bool
-	isBool bool
+	value   table.Value
+	bool    bool
+	unknown bool
+	isBool  bool
 }
 
+// evalWhere keeps a row only when the predicate is true, not unknown.
 func evalWhere(expr Expr, row table.Record) (bool, error) {
 	if expr == nil {
 		return true, nil
@@ -241,7 +257,32 @@ func evalWhere(expr Expr, row table.Record) (bool, error) {
 	if !value.isBool {
 		return false, fmt.Errorf("%w: where expression is not boolean", ErrExec)
 	}
-	return value.bool, nil
+	return value.bool && !value.unknown, nil
+}
+
+// logic applies SQL's three-valued AND or OR.
+func logic(op string, left, right evalResult) evalResult {
+	out := evalResult{isBool: true}
+	isFalse := func(r evalResult) bool { return !r.unknown && !r.bool }
+	isTrue := func(r evalResult) bool { return !r.unknown && r.bool }
+	switch op {
+	case "and":
+		switch {
+		case isFalse(left) || isFalse(right):
+		case left.unknown || right.unknown:
+			out.unknown = true
+		default:
+			out.bool = true
+		}
+	default: // or
+		switch {
+		case isTrue(left) || isTrue(right):
+			out.bool = true
+		case left.unknown || right.unknown:
+			out.unknown = true
+		}
+	}
+	return out
 }
 
 func evalExpr(expr Expr, row table.Record) (evalResult, error) {
@@ -267,10 +308,7 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 			if !left.isBool || !right.isBool {
 				return evalResult{}, fmt.Errorf("%w: logical operands must be boolean", ErrExec)
 			}
-			if expr.Op == "and" {
-				return evalResult{bool: left.bool && right.bool, isBool: true}, nil
-			}
-			return evalResult{bool: left.bool || right.bool, isBool: true}, nil
+			return logic(expr.Op, left, right), nil
 		}
 		left, err := evalExpr(expr.Left, row)
 		if err != nil {
@@ -280,11 +318,23 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 		if err != nil {
 			return evalResult{}, err
 		}
+		if left.value.IsNull() || right.value.IsNull() {
+			return evalResult{unknown: true, isBool: true}, nil
+		}
 		result, err := compareValues(left.value, right.value, expr.Op)
 		if err != nil {
 			return evalResult{}, err
 		}
 		return evalResult{bool: result, isBool: true}, nil
+	case *IsNullExpr:
+		operand, err := evalExpr(expr.Expr, row)
+		if err != nil {
+			return evalResult{}, err
+		}
+		if operand.isBool {
+			return evalResult{}, fmt.Errorf("%w: IS NULL needs a value", ErrExec)
+		}
+		return evalResult{bool: operand.value.IsNull() != expr.Not, isBool: true}, nil
 	default:
 		return evalResult{}, fmt.Errorf("%w: unknown expression", ErrExec)
 	}
@@ -333,12 +383,19 @@ func literalUntyped(literal Literal) table.Value {
 		return table.Int64Value(literal.Int)
 	case LiteralString:
 		return table.BytesValue([]byte(literal.String))
+	case LiteralNull:
+		return table.NullValue()
 	default:
 		return table.Value{}
 	}
 }
 
+// literalToValue converts a literal to a column type. NULL converts to any
+// type; the table layer rejects it for columns that do not accept NULL.
 func literalToValue(literal Literal, valueType table.Type) (table.Value, error) {
+	if literal.Kind == LiteralNull {
+		return table.NullValue(), nil
+	}
 	switch valueType {
 	case table.TypeInt64:
 		if literal.Kind != LiteralInt {

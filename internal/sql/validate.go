@@ -12,11 +12,14 @@ type expressionType struct {
 	value   table.Type
 	boolean bool
 	str     bool // an untyped string literal: compares with bytes or text
+	null    bool // the NULL literal: compares with anything, never true
 }
 
 // comparable reports whether two value expressions may be compared.
 func comparable(left, right expressionType) bool {
 	switch {
+	case left.null || right.null:
+		return true
 	case left.value == right.value:
 		return true
 	case left.str:
@@ -61,7 +64,21 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 			return expressionType{value: table.TypeInt64}, nil
 		case LiteralString:
 			return expressionType{value: table.TypeBytes, str: true}, nil
+		case LiteralNull:
+			return expressionType{null: true}, nil
 		}
+	case *IsNullExpr:
+		if expr == nil {
+			break
+		}
+		operand, err := validateExpr(def, expr.Expr)
+		if err != nil {
+			return expressionType{}, err
+		}
+		if operand.boolean {
+			return expressionType{}, fmt.Errorf("%w: IS NULL needs a value", ErrExec)
+		}
+		return expressionType{boolean: true}, nil
 	case *BinaryExpr:
 		if expr == nil {
 			break
