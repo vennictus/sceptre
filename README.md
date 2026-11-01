@@ -191,12 +191,14 @@ reliability: consistency check ok; crash recovery ok across 9 cases
 Sceptre intentionally supports a small SQL subset:
 
 ```sql
-CREATE TABLE users (id int64, name bytes, age int64, city bytes, PRIMARY KEY (id));
+CREATE TABLE users (id int64, name text NOT NULL, email text UNIQUE, age int64, city bytes, PRIMARY KEY (id));
 CREATE INDEX users_age ON users (age);
-INSERT INTO users (id, name, age, city) VALUES (1, 'Ada', 31, 'delhi');
-SELECT id, name FROM users WHERE age = 31;
+INSERT INTO users (id, name, age, city) VALUES (1, 'Ada', 31, 'delhi');  -- email is NULL
+SELECT id, name FROM users WHERE age = 31 AND email IS NULL;
 UPDATE users SET age = 32 WHERE id = 1;
+ALTER TABLE users ADD COLUMN bio text;
 DELETE FROM users WHERE id = 1;
+DROP TABLE IF EXISTS users;
 BEGIN; SAVEPOINT s; ROLLBACK TO s; COMMIT;  -- through a Session, one statement per call
 ```
 
