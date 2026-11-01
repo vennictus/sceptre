@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/vennictus/sceptre"
 )
@@ -28,13 +29,23 @@ func (v Scalar) decode() (sceptre.Value, error) {
 			return sceptre.Value{}, fmt.Errorf("invalid base64 binding")
 		}
 		return sceptre.Bytes(b), nil
+	case "text":
+		if !utf8.ValidString(v.Value) {
+			return sceptre.Value{}, fmt.Errorf("invalid UTF-8 text binding")
+		}
+		return sceptre.Text(v.Value), nil
 	default:
-		return sceptre.Value{}, fmt.Errorf("binding type must be int64 or bytes")
+		return sceptre.Value{}, fmt.Errorf("binding type must be int64, bytes or text")
 	}
 }
+
+// scalar encodes int64 as a decimal string, bytes as base64, and text as is.
 func scalar(v sceptre.Value) Scalar {
-	if v.Type == sceptre.TypeInt64 {
+	switch v.Type {
+	case sceptre.TypeInt64:
 		return Scalar{Type: "int64", Value: strconv.FormatInt(v.I64, 10)}
+	case sceptre.TypeText:
+		return Scalar{Type: "text", Value: string(v.Bytes)}
 	}
 	return Scalar{Type: "bytes", Value: base64.StdEncoding.EncodeToString(v.Bytes)}
 }
@@ -98,11 +109,7 @@ func schemas(defs []sceptre.TableDef) []schema {
 			out[i].Indexes = []sceptre.IndexDef{}
 		}
 		for j, c := range d.Columns {
-			typ := "bytes"
-			if c.Type == sceptre.TypeInt64 {
-				typ = "int64"
-			}
-			out[i].Columns[j] = column{Name: c.Name, Type: typ}
+			out[i].Columns[j] = column{Name: c.Name, Type: c.Type.String()}
 		}
 	}
 	return out

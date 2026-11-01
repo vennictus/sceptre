@@ -453,3 +453,19 @@ func TestTransactionSavepointsAndSQLControl(t *testing.T) {
 		t.Fatalf("SQL BEGIN outside a transaction route: %d %+v", r.Status, r.Body)
 	}
 }
+
+func TestTextValuesTravelAsPlainStrings(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.mustSQL("CREATE TABLE notes (id int64, body text, PRIMARY KEY (id))")
+	r := f.call("/api/execute", `{"sql":"INSERT INTO notes (id, body) VALUES (1, ?)","params":[{"type":"text","value":"héllo"}]}`, nil)
+	if r.Status != 200 {
+		t.Fatalf("insert text binding: %d %+v", r.Status, r.Body.Error)
+	}
+	r = f.sql("/api/execute", "SELECT body FROM notes", nil)
+	if len(r.Body.Result.Rows) != 1 || r.Body.Result.Rows[0][0].Type != "text" || r.Body.Result.Rows[0][0].Value != "héllo" {
+		t.Fatalf("text result = %+v", r.Body.Result)
+	}
+	if r := f.call("/api/schema", "{}", nil); r.Body.Schema[0].Columns[1].Type != "text" {
+		t.Fatalf("schema column type = %+v", r.Body.Schema)
+	}
+}
