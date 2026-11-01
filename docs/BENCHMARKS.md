@@ -20,7 +20,7 @@ go run ./cmd/sceptre-bench \
 
 Use `-dir` to select an existing parent directory on the filesystem being
 measured. This parent is preserved; only fresh benchmark subdirectories are
-removed. No relaxed durability setting exists. Setup, catalog/index creation,
+removed. The runner always measures full durability. Setup, catalog/index creation,
 seeding, verification, and reopening are excluded from operation latency and
 physical-write counters. Latency samples shorter than the recorded
 `clock_resolution_ns` read as 0; Windows monotonic clocks can step in 0.5 ms or
@@ -258,3 +258,18 @@ times the throughput.
 
 Each call still parses its statement twice: once to classify it as a read and
 once to execute it. This is a known remaining cost.
+
+## Durability modes: 2026-11-01
+
+`go test -run '^$' -bench AutocommitInsert .` (in the repository root) measures
+one-row autocommit INSERTs through `DB.Execute`, on the WSL2 machine above with
+the database on the Windows drive (`/mnt/c`), where each sync is slow. Values are
+the median of three 2-second runs.
+
+| Mode | Syncs per commit | Latency per INSERT |
+| --- | ---: | ---: |
+| `full` | 2 | about 5.8 ms |
+| `normal` | 1 | about 3.2 ms |
+
+Normal durability is about 1.8 times the commit throughput here. Commit latency
+is dominated by sync cost, so the ratio depends on the filesystem and device.

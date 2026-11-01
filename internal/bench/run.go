@@ -110,7 +110,7 @@ func Run(opts Options, progress func(Result)) (Report, error) {
 	defer os.RemoveAll(root)
 	report := Report{Version: 1, RecordedUTC: time.Now().UTC().Format(time.RFC3339), Environment: Environment{
 		GoVersion: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH, CPU: cpuName(), CPUs: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0),
-		Storage: opts.Storage, Revision: opts.Revision, PageSize: pager.DefaultPageSize, Durability: "page sync + metadata sync per commit; no relaxed durability",
+		Storage: opts.Storage, Revision: opts.Revision, PageSize: pager.DefaultPageSize, Durability: "full: page sync + metadata sync per commit",
 		ClockResolutionNS: clockResolution(),
 	}}
 	for _, rows := range opts.Rows {
