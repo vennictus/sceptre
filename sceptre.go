@@ -21,10 +21,14 @@ type Type = table.Type
 const (
 	TypeInt64 = table.TypeInt64
 	TypeBytes = table.TypeBytes
+	TypeText  = table.TypeText
 )
 
 func Int64(v int64) Value  { return table.Int64Value(v) }
 func Bytes(v []byte) Value { return table.BytesValue(v) }
+
+// Text returns a text value; it must be valid UTF-8.
+func Text(v string) Value { return table.TextValue(v) }
 
 type Result = sql.Result
 type TableDef = table.TableDef

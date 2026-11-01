@@ -1165,10 +1165,8 @@ func printSchema(stdout io.Writer, def table.TableDef) {
 
 func formatType(valueType table.Type) string {
 	switch valueType {
-	case table.TypeInt64:
-		return "int64"
-	case table.TypeBytes:
-		return "bytes"
+	case table.TypeInt64, table.TypeBytes, table.TypeText:
+		return valueType.String()
 	default:
 		return "unknown"
 	}
@@ -1212,7 +1210,7 @@ func formatValue(value table.Value) string {
 	switch value.Type {
 	case table.TypeInt64:
 		return fmt.Sprintf("%d", value.I64)
-	case table.TypeBytes:
+	case table.TypeBytes, table.TypeText:
 		return string(value.Bytes)
 	default:
 		return "<invalid>"
