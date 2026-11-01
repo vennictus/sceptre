@@ -22,6 +22,8 @@ const (
 	TypeInt64 = table.TypeInt64
 	TypeBytes = table.TypeBytes
 	TypeText  = table.TypeText
+	// TypeNull is the type of Null(); columns are never of this type.
+	TypeNull = table.TypeNull
 )
 
 func Int64(v int64) Value  { return table.Int64Value(v) }
@@ -29,6 +31,10 @@ func Bytes(v []byte) Value { return table.BytesValue(v) }
 
 // Text returns a text value; it must be valid UTF-8.
 func Text(v string) Value { return table.TextValue(v) }
+
+// Null returns the SQL NULL, as a binding for any nullable column. Results
+// report NULL with Value.IsNull.
+func Null() Value { return table.NullValue() }
 
 type Result = sql.Result
 type TableDef = table.TableDef

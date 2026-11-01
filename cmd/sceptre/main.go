@@ -1212,6 +1212,8 @@ func formatValue(value table.Value) string {
 		return fmt.Sprintf("%d", value.I64)
 	case table.TypeBytes, table.TypeText:
 		return string(value.Bytes)
+	case table.TypeNull:
+		return "NULL"
 	default:
 		return "<invalid>"
 	}
