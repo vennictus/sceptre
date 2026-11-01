@@ -14,7 +14,7 @@ func appendEncodedValue(dst []byte, value Value) []byte {
 		encoded := uint64(value.I64) ^ (1 << 63)
 		binary.BigEndian.PutUint64(buf[:], encoded)
 		return append(dst, buf[:]...)
-	case TypeBytes:
+	case TypeBytes, TypeText:
 		for _, b := range value.Bytes {
 			switch b {
 			case 0x00:
@@ -39,12 +39,12 @@ func consumeEncodedValue(src []byte, valueType Type) (Value, int, error) {
 		}
 		encoded := binary.BigEndian.Uint64(src[:8]) ^ (1 << 63)
 		return Int64Value(int64(encoded)), 8, nil
-	case TypeBytes:
+	case TypeBytes, TypeText:
 		out := make([]byte, 0)
 		for i := 0; i < len(src); {
 			switch src[i] {
 			case 0x00:
-				return BytesValue(out), i + 1, nil
+				return Value{Type: valueType, Bytes: out}, i + 1, nil
 			case 0x01:
 				if i+1 >= len(src) {
 					return Value{}, 0, ErrCorruptRecord

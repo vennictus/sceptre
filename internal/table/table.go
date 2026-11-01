@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
+
 	"github.com/vennictus/sceptre/internal/kv"
 )
 
@@ -14,6 +16,7 @@ type Type uint32
 const (
 	TypeBytes Type = 1
 	TypeInt64 Type = 2
+	TypeText  Type = 3 // UTF-8; stored and ordered like bytes
 
 	rowKeyPrefix       byte   = 0x10
 	indexKeyPrefix     byte   = 0x11
@@ -119,6 +122,11 @@ func BytesValue(value []byte) Value {
 }
 
 // Int64Value constructs a signed integer table value.
+// TextValue returns a text value. It must be valid UTF-8 to be stored.
+func TextValue(value string) Value {
+	return Value{Type: TypeText, Bytes: []byte(value)}
+}
+
 func Int64Value(value int64) Value {
 	return Value{Type: TypeInt64, I64: value}
 }
@@ -942,12 +950,31 @@ func catalogTableKey(name string) []byte {
 }
 
 func validType(valueType Type) bool {
-	return valueType == TypeBytes || valueType == TypeInt64
+	return valueType == TypeBytes || valueType == TypeInt64 || valueType == TypeText
 }
 
 func valueMatchesType(value Value, valueType Type) bool {
-	return value.Type == valueType && validType(value.Type)
+	if value.Type != valueType || !validType(value.Type) {
+		return false
+	}
+	return value.Type != TypeText || utf8.Valid(value.Bytes)
 }
+
+// String returns the SQL name of the type.
+func (t Type) String() string {
+	switch t {
+	case TypeBytes:
+		return "bytes"
+	case TypeInt64:
+		return "int64"
+	case TypeText:
+		return "text"
+	}
+	return fmt.Sprintf("type(%d)", uint32(t))
+}
+
+// HasBytes reports whether values of the type keep their data in Value.Bytes.
+func (t Type) HasBytes() bool { return t == TypeBytes || t == TypeText }
 
 func columnType(def TableDef, name string) (Type, bool) {
 	for _, column := range def.Columns {
@@ -1008,7 +1035,7 @@ func cloneIndexDef(index IndexDef) IndexDef {
 }
 
 func cloneValue(value Value) Value {
-	if value.Type == TypeBytes {
+	if value.Type.HasBytes() {
 		value.Bytes = cloneBytes(value.Bytes)
 	}
 	return value

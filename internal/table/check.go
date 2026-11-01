@@ -350,7 +350,7 @@ func valueString(value Value) string {
 	switch value.Type {
 	case TypeInt64:
 		return fmt.Sprintf("%d", value.I64)
-	case TypeBytes:
+	case TypeBytes, TypeText:
 		return fmt.Sprintf("%q", string(value.Bytes))
 	default:
 		return "<invalid>"
