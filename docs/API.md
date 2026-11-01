@@ -148,7 +148,9 @@ at a time, and its methods are safe for concurrent calls. Repeated Close is safe
 
 ## Typed bindings and bounds
 
-Use positional `?` bindings with `sceptre.Int64` or `sceptre.Bytes`. Bindings become
+Use positional `?` bindings with `sceptre.Int64`, `sceptre.Bytes`, `sceptre.Text`
+or `sceptre.Null`. A Bytes binding is accepted by a text column when it is valid
+UTF-8. Results report NULL as a Value whose `IsNull` is true. Bindings become
 typed literal tokens; their contents are never parsed as SQL text. Quotes, question
 marks, NUL, and arbitrary bytes survive unchanged. Question marks inside SQL string
 literals do not consume bindings. Bindings are supported in literal positions,
@@ -156,7 +158,8 @@ including integer LIMIT/OFFSET, and cannot replace identifiers or SQL syntax.
 
 Missing, extra, or unsupported-type bindings return `parameter`. Schema type
 mismatches return `invalid`; a byte binding where the grammar requires an integer,
-such as LIMIT, returns `parse`. There is no implicit coercion or NULL support.
+such as LIMIT, returns `parse`. NULL in a `NOT NULL` or primary-key column
+returns `invalid`. There is no implicit numeric coercion.
 
 `Options.MaxRows` defaults to 1000 and accepts 1 through 100000. SELECT without a
 limit receives that limit; a larger explicit limit is capped to it. Smaller limits,
@@ -180,7 +183,7 @@ Use `errors.As(err, &executionError)` with `var executionError *sceptre.Error`.
 | Code | Meaning |
 | --- | --- |
 | `parse`, `parameter`, `invalid` | Invalid syntax, bindings, schema/type use, or options; a format v1 file that needs `sceptre upgrade` |
-| `constraint`, `not_found` | Duplicate primary key/schema/index, or missing object or savepoint |
+| `constraint`, `not_found` | Duplicate primary key/schema/index or unique value, or missing object or savepoint |
 | `limit` | Request bound exceeded, a stored key above the page-size limit (1000 bytes at 4096-byte pages), or a value above 1 GiB |
 | `canceled` | Context canceled or deadline expired before work starts |
 | `closed`, `transaction_closed` | Invalid database or transaction lifecycle |
