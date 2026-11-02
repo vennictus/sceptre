@@ -219,7 +219,7 @@ func TestSchemaAndExplainWireShapes(t *testing.T) {
 		t.Fatalf("schema: %d %+v", r.Status, r.Body)
 	}
 	s := r.Body.Schema[0]
-	if s.Name != "users" || len(s.Columns) != 3 || s.Columns[1] != (column{"name", "bytes"}) || len(s.Indexes) != 1 || s.Indexes[0].Name != "users_age" {
+	if s.Name != "users" || len(s.Columns) != 3 || s.Columns[1] != (column{"name", "bytes", true}) || len(s.Indexes) != 1 || s.Indexes[0].Name != "users_age" {
 		t.Fatalf("schema shape: %+v", s)
 	}
 	r = f.sql("/api/explain", "SELECT * FROM users WHERE age = 42 LIMIT 5", nil)
@@ -451,5 +451,58 @@ func TestTransactionSavepointsAndSQLControl(t *testing.T) {
 	}
 	if r := f.sql("/api/execute", "BEGIN", nil); r.Body.Error == nil || r.Body.Error.Code != "transaction_state" {
 		t.Fatalf("SQL BEGIN outside a transaction route: %d %+v", r.Status, r.Body)
+	}
+}
+
+func TestTextValuesTravelAsPlainStrings(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.mustSQL("CREATE TABLE notes (id int64, body text, PRIMARY KEY (id))")
+	r := f.call("/api/execute", `{"sql":"INSERT INTO notes (id, body) VALUES (1, ?)","params":[{"type":"text","value":"héllo"}]}`, nil)
+	if r.Status != 200 {
+		t.Fatalf("insert text binding: %d %+v", r.Status, r.Body.Error)
+	}
+	r = f.sql("/api/execute", "SELECT body FROM notes", nil)
+	if len(r.Body.Result.Rows) != 1 || r.Body.Result.Rows[0][0].Type != "text" || r.Body.Result.Rows[0][0].Value != "héllo" {
+		t.Fatalf("text result = %+v", r.Body.Result)
+	}
+	if r := f.call("/api/schema", "{}", nil); r.Body.Schema[0].Columns[1].Type != "text" {
+		t.Fatalf("schema column type = %+v", r.Body.Schema)
+	}
+}
+
+func TestNullValuesOnTheWire(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.mustSQL("CREATE TABLE notes (id int64, body text, PRIMARY KEY (id))")
+	if r := f.call("/api/execute", `{"sql":"INSERT INTO notes (id, body) VALUES (1, ?)","params":[{"type":"null","value":""}]}`, nil); r.Status != 200 {
+		t.Fatalf("insert null binding: %d %+v", r.Status, r.Body.Error)
+	}
+	r := f.sql("/api/execute", "SELECT body FROM notes WHERE body IS NULL", nil)
+	if len(r.Body.Result.Rows) != 1 || r.Body.Result.Rows[0][0].Type != "null" {
+		t.Fatalf("null result = %+v", r.Body.Result)
+	}
+	if r := f.call("/api/schema", "{}", nil); !r.Body.Schema[0].Columns[1].Nullable || r.Body.Schema[0].Columns[0].Nullable {
+		t.Fatalf("schema nullability = %+v", r.Body.Schema[0].Columns)
+	}
+	if r := f.call("/api/execute", `{"sql":"SELECT * FROM notes WHERE id = ?","params":[{"type":"null","value":"x"}]}`, nil); r.Status != 400 {
+		t.Fatalf("null binding with a value: %d", r.Status)
+	}
+}
+
+func TestFloatBoolTimestampOnTheWire(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.mustSQL("CREATE TABLE ev (id int64, score float64, done bool, at timestamp, PRIMARY KEY (id))")
+	body := `{"sql":"INSERT INTO ev (id, score, done, at) VALUES (1, ?, ?, ?)","params":[{"type":"float64","value":"0.1"},{"type":"bool","value":"true"},{"type":"timestamp","value":"2026-11-02T10:00:00.5Z"}]}`
+	if r := f.call("/api/execute", body, nil); r.Status != 200 {
+		t.Fatalf("insert: %d %+v", r.Status, r.Body.Error)
+	}
+	r := f.sql("/api/execute", "SELECT score, done, at FROM ev", nil)
+	row := r.Body.Result.Rows[0]
+	if row[0] != (Scalar{"float64", "0.1"}) || row[1] != (Scalar{"bool", "true"}) || row[2] != (Scalar{"timestamp", "2026-11-02T10:00:00.5Z"}) {
+		t.Fatalf("row = %+v", row)
+	}
+	for _, p := range []string{`{"type":"float64","value":"NaN"}`, `{"type":"bool","value":"1"}`, `{"type":"timestamp","value":"yesterday"}`} {
+		if r := f.call("/api/execute", `{"sql":"SELECT * FROM ev WHERE id = ?","params":[`+p+`]}`, nil); r.Status != 400 {
+			t.Fatalf("binding %s: %d", p, r.Status)
+		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/vennictus/sceptre/internal/kv"
 	"github.com/vennictus/sceptre/internal/sql"
@@ -19,12 +20,35 @@ type Value = table.Value
 type Type = table.Type
 
 const (
-	TypeInt64 = table.TypeInt64
-	TypeBytes = table.TypeBytes
+	TypeInt64     = table.TypeInt64
+	TypeBytes     = table.TypeBytes
+	TypeText      = table.TypeText
+	TypeFloat64   = table.TypeFloat64
+	TypeBool      = table.TypeBool
+	TypeTimestamp = table.TypeTimestamp
+	// TypeNull is the type of Null(); columns are never of this type.
+	TypeNull = table.TypeNull
 )
+
+// Float64 returns a float64 value; NaN and infinities are rejected.
+func Float64(v float64) Value { return table.Float64Value(v) }
+
+// Bool returns a bool value.
+func Bool(v bool) Value { return table.BoolValue(v) }
+
+// Timestamp returns a timestamp value: UTC, truncated to microseconds. Read
+// one back with Value.Time.
+func Timestamp(t time.Time) Value { return table.TimestampValue(t) }
 
 func Int64(v int64) Value  { return table.Int64Value(v) }
 func Bytes(v []byte) Value { return table.BytesValue(v) }
+
+// Text returns a text value; it must be valid UTF-8.
+func Text(v string) Value { return table.TextValue(v) }
+
+// Null returns the SQL NULL, as a binding for any nullable column. Results
+// report NULL with Value.IsNull.
+func Null() Value { return table.NullValue() }
 
 type Result = sql.Result
 type TableDef = table.TableDef
@@ -353,7 +377,22 @@ func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, 
 	if sql.IsTransactionControl(stmt) {
 		return Result{}, executionError(t.control(stmt))
 	}
+	// A statement may write in several steps (an upsert row by row, a table
+	// and its unique indexes). Run it under a savepoint so a failure leaves
+	// none of its writes behind.
+	mark, err := t.inner.Savepoint()
+	if err != nil {
+		return Result{}, executionError(err)
+	}
 	r, err := sql.ExecuteStatement(t.tables, stmt)
+	if err != nil {
+		if rbErr := t.inner.RollbackTo(mark); rbErr != nil {
+			err = errors.Join(err, rbErr)
+		}
+	}
+	if relErr := t.inner.Release(); relErr != nil && err == nil {
+		err = relErr
+	}
 	return r, executionError(err)
 }
 

@@ -191,18 +191,28 @@ reliability: consistency check ok; crash recovery ok across 9 cases
 Sceptre intentionally supports a small SQL subset:
 
 ```sql
-CREATE TABLE users (id int64, name bytes, age int64, city bytes, PRIMARY KEY (id));
+CREATE TABLE users (id int64, name text NOT NULL, email text UNIQUE, age int64, city bytes, PRIMARY KEY (id));
 CREATE INDEX users_age ON users (age);
-INSERT INTO users (id, name, age, city) VALUES (1, 'Ada', 31, 'delhi');
-SELECT id, name FROM users WHERE age = 31;
+INSERT INTO users (id, name, age, city) VALUES (1, 'Ada', 31, 'delhi');  -- email is NULL
+SELECT id, name FROM users WHERE age = 31 AND email IS NULL;
 UPDATE users SET age = 32 WHERE id = 1;
+ALTER TABLE users ADD COLUMN bio text;
 DELETE FROM users WHERE id = 1;
+DROP TABLE IF EXISTS users;
 BEGIN; SAVEPOINT s; ROLLBACK TO s; COMMIT;  -- through a Session, one statement per call
+CREATE TABLE posts (id int64 PRIMARY KEY AUTOINCREMENT, title text NOT NULL,
+  state text NOT NULL DEFAULT 'draft' CHECK (state = 'draft' OR state = 'live'),
+  score float64, pinned bool DEFAULT FALSE, created timestamp DEFAULT CURRENT_TIMESTAMP);
+INSERT INTO posts (title) VALUES ('a'), ('b') RETURNING id, created;
+INSERT INTO posts (id, title) VALUES (1, 'a2') ON CONFLICT (id) DO UPDATE SET title = excluded.title;
+SELECT id FROM posts WHERE created >= '2026-11-01' AND CAST(score AS int64) = 3;
 ```
 
+Types are int64, float64, bool, text, bytes and timestamp. The full list of
+what is and is not supported is the [SQL support matrix](docs/SQL.md).
 Supported planner paths include table scans, primary-key lookups,
 primary-key ranges, and exact secondary-index lookups. Joins, aggregations,
-ordering, and broad SQL compatibility are outside the current scope.
+ordering, and broad SQL compatibility come in Phase 4.
 
 SQL validates column references, predicate types, and update assignments before
 scanning, including queries that match no rows. Primary-key assignments in
@@ -268,6 +278,7 @@ sceptre/
 |:--|:--|
 | **[GUIDE.md](GUIDE.md)** | Hands-on walkthrough of the CLI, demo, inspection, tracing, and recovery tools |
 | **[PRODUCT_SPEC.md](PRODUCT_SPEC.md)** | Technical design, storage model, transaction scope, file format, and recovery protocol |
+| **[SQL support matrix](docs/SQL.md)** | Types, CAST, NULL, statements, constraints, and what is not supported |
 | **[Engine contract](docs/ENGINE_CONTRACT.md)** | Supported guarantees, concurrency and compatibility limits, and implementation map |
 | **[Go API](docs/API.md)** | Typed SQL parameters, multi-statement transactions, read-only snapshots, lifecycle, bounds, and stable errors |
 | **[Local service](docs/SERVICE.md)** | `sceptre serve` HTTP API, Studio, security model, transactions, and limits |

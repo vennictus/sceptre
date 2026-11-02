@@ -44,8 +44,13 @@ All API routes are `POST` with an `application/json` body of at most 128 KiB:
 | `/api/tx/commit`, `/api/tx/rollback` | Finish the transaction |
 
 Values never lose precision in JSON. Integers travel as decimal strings
-(`{"type":"int64","value":"9223372036854775807"}`) and byte strings as standard
-base64 (`{"type":"bytes","value":"SGk="}`). `rows_affected` is also a string.
+(`{"type":"int64","value":"9223372036854775807"}`), byte strings as standard
+base64 (`{"type":"bytes","value":"SGk="}`), text as itself
+(`{"type":"text","value":"Hi"}`), float64 as the shortest decimal
+(`{"type":"float64","value":"0.1"}`), bool as `"true"` or `"false"`, timestamps as
+RFC 3339 in UTC (`{"type":"timestamp","value":"2026-11-02T10:00:00Z"}`), and NULL
+as `{"type":"null","value":""}`.
+Schema columns report `"nullable"`. `rows_affected` is also a string.
 
 Every response has the same shape:
 

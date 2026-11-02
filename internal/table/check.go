@@ -166,10 +166,25 @@ func (db *DB) checkRows(def TableDef, expectedIndexKeys map[string]string) (int,
 	defer scanner.Close()
 
 	rows := 0
+	uniqueSeen := make(map[string]struct{})
 	for scanner.Valid() {
 		row, err := scanner.Deref()
 		if err != nil {
 			return 0, nil, err
+		}
+		for _, index := range def.Indexes {
+			if !index.Unique {
+				continue
+			}
+			if prefix, ok := uniquePrefix(def, index, row); ok {
+				if _, dup := uniqueSeen[string(prefix)]; dup {
+					issues = append(issues, CheckIssue{
+						Code:   "unique_violation",
+						Detail: fmt.Sprintf("table %s index %s row %s duplicates another row", def.Name, index.Name, recordString(def.Columns, row)),
+					})
+				}
+				uniqueSeen[string(prefix)] = struct{}{}
+			}
 		}
 		if err := validateFullRecord(def, row); err != nil {
 			issues = append(issues, CheckIssue{
@@ -254,7 +269,7 @@ func encodedIndexValueLen(def TableDef, index IndexDef, key []byte) int {
 	consumed := 0
 	for _, name := range index.Columns {
 		valueType, _ := columnType(def, name)
-		_, n, err := consumeEncodedValue(remaining, valueType)
+		_, n, err := consumeColumnValue(remaining, valueType, def.tagged())
 		if err != nil {
 			return len(remaining)
 		}
@@ -350,8 +365,12 @@ func valueString(value Value) string {
 	switch value.Type {
 	case TypeInt64:
 		return fmt.Sprintf("%d", value.I64)
-	case TypeBytes:
+	case TypeBytes, TypeText:
 		return fmt.Sprintf("%q", string(value.Bytes))
+	case TypeNull:
+		return "NULL"
+	case TypeFloat64, TypeBool, TypeTimestamp:
+		return FormatValue(value)
 	default:
 		return "<invalid>"
 	}

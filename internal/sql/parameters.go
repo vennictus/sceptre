@@ -3,6 +3,7 @@ package sql
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/vennictus/sceptre/internal/table"
@@ -31,8 +32,19 @@ func ParseParameters(input string, values []table.Value) (Statement, error) {
 		switch v.Type {
 		case table.TypeInt64:
 			tokens[i] = token{kind: tokenNumber, text: strconv.FormatInt(v.I64, 10)}
-		case table.TypeBytes:
+		case table.TypeBytes, table.TypeText:
 			tokens[i] = token{kind: tokenString, text: string(v.Bytes)}
+		case table.TypeNull:
+			tokens[i] = token{kind: tokenNull, text: "NULL"}
+		case table.TypeFloat64:
+			if math.IsNaN(v.F64) || math.IsInf(v.F64, 0) {
+				return nil, fmt.Errorf("%w: binding %d is not a finite number", ErrParameter, n)
+			}
+			tokens[i] = token{kind: tokenFloat, text: strconv.FormatFloat(v.F64, 'g', -1, 64)}
+		case table.TypeBool:
+			tokens[i] = token{kind: tokenBool, text: strconv.FormatBool(v.Bool)}
+		case table.TypeTimestamp:
+			tokens[i] = token{kind: tokenTimestamp, text: strconv.FormatInt(v.I64, 10)}
 		default:
 			return nil, fmt.Errorf("%w: binding %d has unsupported type", ErrParameter, n)
 		}

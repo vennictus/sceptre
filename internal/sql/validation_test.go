@@ -170,9 +170,9 @@ func TestSQLValidatesConstructedStatements(t *testing.T) {
 	}
 	negative := int64(-1)
 	for _, stmt := range []Statement{
-		&InsertStmt{Table: "users", Columns: []string{"id", "name"}, Values: []Literal{{Kind: LiteralInt, Int: 1}}},
+		&InsertStmt{Table: "users", Columns: []string{"id", "name"}, Rows: [][]Literal{{{Kind: LiteralInt, Int: 1}}}},
 		&InsertStmt{Table: "users"},
-		&InsertStmt{Table: "users", Columns: []string{"id", "id", "name"}, Values: []Literal{{Kind: LiteralInt, Int: 1}, {Kind: LiteralInt, Int: 2}, {Kind: LiteralString, String: "x"}}},
+		&InsertStmt{Table: "users", Columns: []string{"id", "id", "name"}, Rows: [][]Literal{{{Kind: LiteralInt, Int: 1}, {Kind: LiteralInt, Int: 2}, {Kind: LiteralString, String: "x"}}}},
 		&UpdateStmt{Table: "users"},
 		&SelectStmt{Table: "users", AllColumns: true, Limit: &negative},
 		&SelectStmt{Table: "users", AllColumns: true, Offset: &negative},

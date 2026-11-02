@@ -109,24 +109,38 @@ backstop, but callers should close them. Returned key/value bytes are copies.
 
 ## SQL and values
 
+The full SQL surface (types, CAST, NULL, statements, constraints) is the
+[SQL support matrix](SQL.md). In summary:
+
 | Supported | Limits |
 | --- | --- |
-| CREATE TABLE, CREATE INDEX | No ALTER/DROP, migrations, unique secondary indexes, foreign keys, or checks |
-| INSERT | One literal or parameter-bound row; all declared fields required; duplicate primary key rejected |
-| SELECT | Projection, WHERE comparisons, AND/OR and parentheses, nonnegative LIMIT/OFFSET |
-| UPDATE | Literal or parameter assignments to non-key columns |
-| DELETE | Filtered or all-row deletion |
+| DDL | CREATE TABLE / [UNIQUE] INDEX, DROP, ALTER TABLE ADD/DROP/RENAME; NOT NULL, UNIQUE, DEFAULT, CHECK, AUTOINCREMENT; no foreign keys |
+| INSERT | Many rows or `INSERT ... SELECT`; `ON CONFLICT DO NOTHING / DO UPDATE`; `RETURNING`; values are literals or bindings |
+| SELECT | Projection, WHERE comparisons, `IS [NOT] NULL`, `CAST`, AND/OR and parentheses, nonnegative LIMIT/OFFSET |
+| UPDATE / DELETE | Literal, parameter, or NULL assignments to non-key columns; `RETURNING` |
 | Access paths | Full scan, complete primary-key lookup, single-column primary-key range, complete secondary-index equality lookup |
 | Diagnostics | EXPLAIN, measured SELECT analysis, tracing, schema/page/index inspection, integrity checking |
 
-Types are signed int64 and arbitrary bytes. Integers parse within int64 bounds.
-Byte comparisons use byte order, with no locale collation or implicit numeric
-conversion. SQL string literals use single quotes and doubled embedded quotes.
-Keywords are case insensitive; stored identifiers are matched by their spelling.
-There are no NULL values, floating-point/boolean columns, arithmetic expressions,
-joins, aggregates, or explicit ORDER BY. The public API supports positional typed
-`?` bindings in literal positions, with exact binding counts and no SQL text
-interpolation. CLI parameter input is not implemented.
+Types are `int64`, `float64` (finite), `bool`, `text` (UTF-8), `bytes`, and
+`timestamp` (UTC microseconds). Each has an order-preserving key encoding, so
+all of them work in primary keys, indexes, and range bounds. A literal takes
+the type of the column it meets; other conversions need CAST. Tables created
+before `text` existed keep their `text` columns as bytes.
+
+Columns accept NULL unless declared `NOT NULL` or in the primary key; a
+comparison with NULL is unknown and WHERE keeps only true rows. Unique indexes
+never treat NULLs as equal. Tables created before NULL support use the previous
+row encoding (format 0) and reject NULL until a column is added, which rewrites
+them in the current one (format 1). DROP COLUMN rewrites every row; other
+schema changes touch only the catalog and, for drops, the removed keys. CHECK
+expressions are stored as SQL text and enforced by the SQL layer, not by the
+internal table API.
+
+Through the public API each statement is atomic: it runs under an internal
+savepoint, so a failure leaves none of its writes. The public API supports
+positional typed `?` bindings in literal positions, with exact binding counts
+and no SQL text interpolation. CLI parameter input is not implemented, and raw
+internal SQL (the CLI) commits each internal step separately.
 
 Columns, predicate types, assignments, projections, and pagination bounds are
 checked even for empty tables or no-match access paths. LIMIT 0 is valid. Natural

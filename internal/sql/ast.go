@@ -6,30 +6,60 @@ type Statement interface {
 }
 
 type ColumnDef struct {
-	Name string
-	Type string
+	Name       string
+	Type       string
+	NotNull    bool
+	Unique     bool
+	Default    *Literal
+	DefaultNow bool // DEFAULT CURRENT_TIMESTAMP
+	Checks     []Expr
+	PrimaryKey bool // PRIMARY KEY written on the column
+	AutoInc    bool // AUTOINCREMENT
 }
 
 type CreateTableStmt struct {
-	Name       string
-	Columns    []ColumnDef
-	PrimaryKey []string
+	Name        string
+	Columns     []ColumnDef
+	PrimaryKey  []string
+	IfNotExists bool
+	Checks      []Expr // table-level CHECK constraints
 }
 
 func (*CreateTableStmt) statementNode() {}
 
 type CreateIndexStmt struct {
-	Name    string
-	Table   string
-	Columns []string
+	Name        string
+	Table       string
+	Columns     []string
+	Unique      bool
+	IfNotExists bool
 }
 
 func (*CreateIndexStmt) statementNode() {}
 
+// InsertStmt is INSERT INTO table [(columns)] followed by VALUES rows or a
+// SELECT. Without a column list, values fill every column in order.
 type InsertStmt struct {
-	Table   string
+	Table      string
+	Columns    []string
+	Rows       [][]Literal
+	Select     *SelectStmt
+	OnConflict *OnConflict
+	Returning  *Returning
+}
+
+// OnConflict is ON CONFLICT [(columns)] DO NOTHING, or ON CONFLICT (columns)
+// DO UPDATE SET ... . The columns name the primary key or a unique index.
+type OnConflict struct {
+	Columns   []string
+	DoNothing bool
+	Set       []Assignment
+}
+
+// Returning is RETURNING * or RETURNING columns.
+type Returning struct {
+	All     bool
 	Columns []string
-	Values  []Literal
 }
 
 func (*InsertStmt) statementNode() {}
@@ -48,19 +78,24 @@ func (*SelectStmt) statementNode() {}
 type Assignment struct {
 	Column string
 	Value  Literal
+	// Excluded, in ON CONFLICT DO UPDATE, takes the value the conflicting
+	// insert proposed for that column (excluded.column).
+	Excluded string
 }
 
 type UpdateStmt struct {
 	Table       string
 	Assignments []Assignment
 	Where       Expr
+	Returning   *Returning
 }
 
 func (*UpdateStmt) statementNode() {}
 
 type DeleteStmt struct {
-	Table string
-	Where Expr
+	Table     string
+	Where     Expr
+	Returning *Returning
 }
 
 func (*DeleteStmt) statementNode() {}
@@ -81,12 +116,18 @@ type LiteralKind int
 const (
 	LiteralInt LiteralKind = iota + 1
 	LiteralString
+	LiteralNull
+	LiteralFloat
+	LiteralBool
+	LiteralTimestamp // Int holds microseconds since the epoch
 )
 
 type Literal struct {
 	Kind   LiteralKind
 	Int    int64
 	String string
+	Float  float64
+	Bool   bool
 }
 
 func (*Literal) exprNode() {}
@@ -98,6 +139,45 @@ type BinaryExpr struct {
 }
 
 func (*BinaryExpr) exprNode() {}
+
+// IsNullExpr is expr IS NULL, or IS NOT NULL when Not is set.
+type IsNullExpr struct {
+	Expr Expr
+	Not  bool
+}
+
+func (*IsNullExpr) exprNode() {}
+
+// DropTableStmt is DROP TABLE [IF EXISTS] name.
+type DropTableStmt struct {
+	Name     string
+	IfExists bool
+}
+
+func (*DropTableStmt) statementNode() {}
+
+// DropIndexStmt is DROP INDEX [IF EXISTS] name [ON table]. Without ON, the
+// name must identify one index across all tables.
+type DropIndexStmt struct {
+	Name     string
+	Table    string
+	IfExists bool
+}
+
+func (*DropIndexStmt) statementNode() {}
+
+// AlterTableStmt is ALTER TABLE name followed by exactly one action: ADD
+// [COLUMN] def, DROP [COLUMN] name, RENAME [COLUMN] old TO new, or RENAME TO
+// new.
+type AlterTableStmt struct {
+	Table      string
+	Add        *ColumnDef
+	Drop       string
+	RenameFrom string // with RenameTo: rename a column
+	RenameTo   string // alone: rename the table
+}
+
+func (*AlterTableStmt) statementNode() {}
 
 // BeginStmt is BEGIN [TRANSACTION | WORK].
 type BeginStmt struct{}

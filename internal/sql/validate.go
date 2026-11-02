@@ -11,6 +11,42 @@ import (
 type expressionType struct {
 	value   table.Type
 	boolean bool
+	lit     LiteralKind // set for literals, which take the other side's type
+	null    bool        // the NULL literal: compares with anything, never true
+}
+
+// literalFits reports whether a literal of kind converts to a column type.
+func literalFits(kind LiteralKind, t table.Type) bool {
+	switch kind {
+	case LiteralNull:
+		return true
+	case LiteralInt:
+		return t == table.TypeInt64 || t == table.TypeFloat64
+	case LiteralFloat:
+		return t == table.TypeFloat64
+	case LiteralString:
+		return t == table.TypeBytes || t == table.TypeText || t == table.TypeTimestamp
+	case LiteralBool:
+		return t == table.TypeBool
+	case LiteralTimestamp:
+		return t == table.TypeTimestamp
+	}
+	return false
+}
+
+// comparable reports whether two value expressions may be compared.
+func comparable(left, right expressionType) bool {
+	switch {
+	case left.null || right.null:
+		return true
+	case left.lit != 0 && right.lit != 0:
+		return left.value == right.value || left.value.IsNumeric() && right.value.IsNumeric()
+	case left.lit != 0:
+		return literalFits(left.lit, right.value)
+	case right.lit != 0:
+		return literalFits(right.lit, left.value)
+	}
+	return left.value == right.value
 }
 
 func validateWhere(def table.TableDef, expr Expr) error {
@@ -43,11 +79,39 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 			break
 		}
 		switch expr.Kind {
-		case LiteralInt:
-			return expressionType{value: table.TypeInt64}, nil
-		case LiteralString:
-			return expressionType{value: table.TypeBytes}, nil
+		case LiteralNull:
+			return expressionType{null: true, lit: LiteralNull}, nil
+		case LiteralInt, LiteralString, LiteralFloat, LiteralBool, LiteralTimestamp:
+			return expressionType{value: literalUntyped(*expr).Type, lit: expr.Kind}, nil
 		}
+	case *CastExpr:
+		if expr == nil {
+			break
+		}
+		to, err := sqlType(expr.Type)
+		if err != nil {
+			return expressionType{}, err
+		}
+		operand, err := validateExpr(def, expr.Expr)
+		if err != nil {
+			return expressionType{}, err
+		}
+		if operand.boolean {
+			return expressionType{}, fmt.Errorf("%w: CAST needs a value", ErrExec)
+		}
+		return expressionType{value: to}, nil
+	case *IsNullExpr:
+		if expr == nil {
+			break
+		}
+		operand, err := validateExpr(def, expr.Expr)
+		if err != nil {
+			return expressionType{}, err
+		}
+		if operand.boolean {
+			return expressionType{}, fmt.Errorf("%w: IS NULL needs a value", ErrExec)
+		}
+		return expressionType{boolean: true}, nil
 	case *BinaryExpr:
 		if expr == nil {
 			break
@@ -69,7 +133,7 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 			if left.boolean || right.boolean {
 				return expressionType{}, fmt.Errorf("%w: comparison operands must be values", ErrExec)
 			}
-			if left.value != right.value {
+			if !comparable(left, right) {
 				return expressionType{}, fmt.Errorf("%w: type mismatch", ErrExec)
 			}
 		default:

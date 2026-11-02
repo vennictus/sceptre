@@ -1,9 +1,10 @@
 package sql
 
 import (
-	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vennictus/sceptre/internal/table"
 )
@@ -180,9 +181,11 @@ func normalizeCondition(expr Expr) (Condition, bool) {
 	return Condition{}, false
 }
 
+// exprLiteral returns a literal usable as an access-path bound. NULL is not:
+// a comparison with NULL is never true, so the residual filter handles it.
 func exprLiteral(expr Expr) (Literal, bool) {
 	literal, ok := expr.(*Literal)
-	if !ok {
+	if !ok || literal.Kind == LiteralNull {
 		return Literal{}, false
 	}
 	return *literal, true
@@ -321,18 +324,9 @@ func compareLowerBound(valueType table.Type, left, right Condition) int {
 	if err != nil {
 		return 0
 	}
-	switch valueType {
-	case table.TypeInt64:
-		switch {
-		case leftValue.I64 < rightValue.I64:
-			return -1
-		case leftValue.I64 > rightValue.I64:
-			return 1
-		}
-	case table.TypeBytes:
-		return bytes.Compare(leftValue.Bytes, rightValue.Bytes)
+	if c := table.Compare(leftValue, rightValue); c != 0 {
+		return c
 	}
-
 	if left.Op == right.Op {
 		return 0
 	}
@@ -351,18 +345,9 @@ func compareUpperBound(valueType table.Type, left, right Condition) int {
 	if err != nil {
 		return 0
 	}
-	switch valueType {
-	case table.TypeInt64:
-		switch {
-		case leftValue.I64 < rightValue.I64:
-			return -1
-		case leftValue.I64 > rightValue.I64:
-			return 1
-		}
-	case table.TypeBytes:
-		return bytes.Compare(leftValue.Bytes, rightValue.Bytes)
+	if c := table.Compare(leftValue, rightValue); c != 0 {
+		return c
 	}
-
 	if left.Op == right.Op {
 		return 0
 	}
@@ -414,6 +399,13 @@ func FormatExpr(expr Expr) string {
 			return fmt.Sprintf("(%s %s %s)", left, strings.ToUpper(expr.Op), right)
 		}
 		return fmt.Sprintf("%s %s %s", left, expr.Op, right)
+	case *CastExpr:
+		return "CAST(" + FormatExpr(expr.Expr) + " AS " + expr.Type + ")"
+	case *IsNullExpr:
+		if expr.Not {
+			return FormatExpr(expr.Expr) + " IS NOT NULL"
+		}
+		return FormatExpr(expr.Expr) + " IS NULL"
 	default:
 		return "<expr>"
 	}
@@ -425,6 +417,17 @@ func FormatLiteral(literal Literal) string {
 		return fmt.Sprintf("%d", literal.Int)
 	case LiteralString:
 		return fmt.Sprintf("'%s'", strings.ReplaceAll(literal.String, "'", "''"))
+	case LiteralNull:
+		return "NULL"
+	case LiteralFloat:
+		return strconv.FormatFloat(literal.Float, 'g', -1, 64)
+	case LiteralBool:
+		if literal.Bool {
+			return "TRUE"
+		}
+		return "FALSE"
+	case LiteralTimestamp:
+		return "'" + time.UnixMicro(literal.Int).UTC().Format(time.RFC3339Nano) + "'"
 	default:
 		return "<literal>"
 	}

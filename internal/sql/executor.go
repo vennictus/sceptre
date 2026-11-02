@@ -1,9 +1,11 @@
 package sql
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
+	"slices"
+	"time"
+	"unicode/utf8"
 
 	"github.com/vennictus/sceptre/internal/table"
 )
@@ -40,6 +42,12 @@ func ExecuteStatement(db *table.DB, stmt Statement) (Result, error) {
 		return executeUpdate(db, stmt)
 	case *DeleteStmt:
 		return executeDelete(db, stmt)
+	case *DropTableStmt:
+		return executeDropTable(db, stmt)
+	case *DropIndexStmt:
+		return executeDropIndex(db, stmt)
+	case *AlterTableStmt:
+		return executeAlterTable(db, stmt)
 	case *BeginStmt, *CommitStmt, *RollbackStmt, *SavepointStmt, *ReleaseStmt:
 		return Result{}, fmt.Errorf("%w: transaction control is handled by the caller", ErrExec)
 	default:
@@ -48,36 +56,129 @@ func ExecuteStatement(db *table.DB, stmt Statement) (Result, error) {
 }
 
 func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
+	if stmt.IfNotExists {
+		if _, ok, err := db.Table(stmt.Name); err != nil || ok {
+			return Result{}, err
+		}
+	}
 	def := table.TableDef{
 		Name:       stmt.Name,
 		Columns:    make([]table.Column, 0, len(stmt.Columns)),
 		PrimaryKey: append([]string(nil), stmt.PrimaryKey...),
 	}
+	checks := append([]Expr(nil), stmt.Checks...)
 	for _, column := range stmt.Columns {
-		valueType, err := sqlType(column.Type)
+		c, err := tableColumn(column, slices.Contains(stmt.PrimaryKey, column.Name))
 		if err != nil {
 			return Result{}, err
 		}
-		def.Columns = append(def.Columns, table.Column{Name: column.Name, Type: valueType})
+		def.Columns = append(def.Columns, c)
+		checks = append(checks, column.Checks...)
 	}
+	stored, err := checkStrings(def, checks)
+	if err != nil {
+		return Result{}, err
+	}
+	def.Checks = stored
 	if err := db.CreateTable(def); err != nil {
 		return Result{}, err
+	}
+	for _, column := range stmt.Columns {
+		if !column.Unique {
+			continue
+		}
+		index := table.IndexDef{Name: stmt.Name + "_" + column.Name + "_key", Columns: []string{column.Name}, Unique: true}
+		if err := db.CreateIndex(stmt.Name, index); err != nil {
+			return Result{}, err
+		}
 	}
 	return Result{}, nil
 }
 
+// tableColumn converts a column definition. Columns accept NULL unless NOT
+// NULL or part of the primary key.
+func tableColumn(column ColumnDef, primaryKey bool) (table.Column, error) {
+	typ, err := sqlType(column.Type)
+	if err != nil {
+		return table.Column{}, err
+	}
+	c := table.Column{Name: column.Name, Type: typ, Nullable: !column.NotNull && !primaryKey, DefaultNow: column.DefaultNow, AutoIncrement: column.AutoInc}
+	if column.Default != nil {
+		v, err := literalToValue(*column.Default, typ)
+		if err != nil {
+			return table.Column{}, err
+		}
+		c.Default = &v
+	}
+	return c, nil
+}
+
+// fillAutoIncrement numbers rows that omit the table's AUTOINCREMENT column.
+func fillAutoIncrement(db *table.DB, def table.TableDef, rows []map[string]table.Value) error {
+	var column string
+	for _, c := range def.Columns {
+		if c.AutoIncrement {
+			column = c.Name
+		}
+	}
+	if column == "" {
+		return nil
+	}
+	var missing []map[string]table.Value
+	for _, row := range rows {
+		if _, ok := row[column]; !ok {
+			missing = append(missing, row)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	ids, err := db.NextIDs(def.Name, len(missing))
+	if err != nil {
+		return err
+	}
+	for i, row := range missing {
+		row[column] = table.Int64Value(ids[i])
+	}
+	return nil
+}
+
+// fillDefaults gives every column an insert omitted its default: the
+// statement's time, a stored default, or NULL.
+func fillDefaults(def table.TableDef, values map[string]table.Value, now time.Time) error {
+	for _, column := range def.Columns {
+		if _, ok := values[column.Name]; ok {
+			continue
+		}
+		switch {
+		case column.DefaultNow:
+			values[column.Name] = table.TimestampValue(now)
+		case column.Default != nil:
+			values[column.Name] = *column.Default
+		case column.Nullable:
+			values[column.Name] = table.NullValue()
+		default:
+			return fmt.Errorf("%w: column %s needs a value", ErrExec, column.Name)
+		}
+	}
+	return nil
+}
+
 func executeCreateIndex(db *table.DB, stmt *CreateIndexStmt) (Result, error) {
+	if stmt.IfNotExists {
+		if _, ok, err := db.Index(stmt.Table, stmt.Name); err != nil || ok {
+			return Result{}, err
+		}
+	}
 	err := db.CreateIndex(stmt.Table, table.IndexDef{
 		Name:    stmt.Name,
 		Columns: append([]string(nil), stmt.Columns...),
+		Unique:  stmt.Unique,
 	})
 	return Result{}, err
 }
 
 func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
-	if len(stmt.Columns) == 0 || len(stmt.Columns) != len(stmt.Values) {
-		return Result{}, fmt.Errorf("%w: column/value count mismatch", ErrExec)
-	}
 	def, ok, err := db.Table(stmt.Table)
 	if err != nil {
 		return Result{}, err
@@ -85,26 +186,124 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 	if !ok {
 		return Result{}, table.ErrTableNotFound
 	}
-
-	values := make(map[string]table.Value, len(stmt.Columns))
-	for i, column := range stmt.Columns {
-		if _, exists := values[column]; exists {
-			return Result{}, fmt.Errorf("%w: duplicate insert column %s", ErrExec, column)
-		}
-		valueType, ok := columnType(def, column)
-		if !ok {
-			return Result{}, fmt.Errorf("%w: unknown column %s", ErrExec, column)
-		}
-		value, err := literalToValue(stmt.Values[i], valueType)
-		if err != nil {
-			return Result{}, err
-		}
-		values[column] = value
-	}
-	if err := db.Insert(stmt.Table, table.NewRecord(values)); err != nil {
+	columns, err := insertColumns(def, stmt.Columns)
+	if err != nil {
 		return Result{}, err
 	}
-	return Result{RowsAffected: 1}, nil
+	if stmt.Returning != nil {
+		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
+	}
+	rows, err := insertRows(db, def, columns, stmt)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(rows) == 0 {
+		return Result{}, nil
+	}
+	if err := fillAutoIncrement(db, def, rows); err != nil {
+		return Result{}, err
+	}
+	now := time.Now()
+	records := make([]table.Record, len(rows))
+	for i, values := range rows {
+		if err := fillDefaults(def, values, now); err != nil {
+			return Result{}, err
+		}
+		records[i] = table.NewRecord(values)
+		if err := checkRow(def, records[i]); err != nil {
+			return Result{}, err
+		}
+	}
+	if stmt.OnConflict != nil {
+		if records, err = insertWithConflicts(db, def, stmt.OnConflict, records); err != nil {
+			return Result{}, err
+		}
+	} else if err := db.InsertMany(stmt.Table, records); err != nil {
+		return Result{}, err
+	}
+	if stmt.Returning != nil {
+		return returningResult(def, stmt.Returning, records)
+	}
+	return Result{RowsAffected: len(records)}, nil
+}
+
+// insertColumns resolves an INSERT column list; none means every column.
+func insertColumns(def table.TableDef, names []string) ([]table.Column, error) {
+	if names == nil {
+		return append([]table.Column(nil), def.Columns...), nil
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("%w: column/value count mismatch", ErrExec)
+	}
+	seen := make(map[string]bool, len(names))
+	out := make([]table.Column, 0, len(names))
+	for _, name := range names {
+		if seen[name] {
+			return nil, fmt.Errorf("%w: duplicate insert column %s", ErrExec, name)
+		}
+		seen[name] = true
+		var found bool
+		for _, c := range def.Columns {
+			if c.Name == name {
+				out = append(out, c)
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: unknown column %s", ErrExec, name)
+		}
+	}
+	return out, nil
+}
+
+// insertRows builds the value maps an INSERT writes, from VALUES literals or
+// from the rows of its SELECT, matched to columns by position.
+func insertRows(db *table.DB, def table.TableDef, columns []table.Column, stmt *InsertStmt) ([]map[string]table.Value, error) {
+	if stmt.Select != nil {
+		res, err := executeSelect(db, stmt.Select)
+		if err != nil {
+			return nil, err
+		}
+		if len(res.Columns) != len(columns) {
+			return nil, fmt.Errorf("%w: SELECT returns %d columns for %d", ErrExec, len(res.Columns), len(columns))
+		}
+		rows := make([]map[string]table.Value, len(res.Rows))
+		for i, src := range res.Rows {
+			rows[i] = make(map[string]table.Value, len(columns))
+			for j, c := range columns {
+				v := src[j]
+				if !v.IsNull() && v.Type != c.Type {
+					if v.Type == table.TypeInt64 && c.Type == table.TypeFloat64 {
+						v = table.Float64Value(float64(v.I64))
+					} else {
+						return nil, fmt.Errorf("%w: SELECT column %d is %s, %s is %s", ErrExec, j+1, v.Type, c.Name, c.Type)
+					}
+				}
+				rows[i][c.Name] = v
+			}
+		}
+		return rows, nil
+	}
+	if len(stmt.Rows) == 0 {
+		return nil, fmt.Errorf("%w: column/value count mismatch", ErrExec)
+	}
+	rows := make([]map[string]table.Value, len(stmt.Rows))
+	for i, literals := range stmt.Rows {
+		if len(literals) != len(columns) {
+			return nil, fmt.Errorf("%w: column/value count mismatch", ErrExec)
+		}
+		rows[i] = make(map[string]table.Value, len(columns))
+		for j, c := range columns {
+			v, err := literalToValue(literals[j], c.Type)
+			if err != nil {
+				return nil, err
+			}
+			rows[i][c.Name] = v
+		}
+	}
+	return rows, nil
 }
 
 func executeSelect(db *table.DB, stmt *SelectStmt) (Result, error) {
@@ -183,10 +382,21 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 		for column, value := range assignments {
 			updated.Values[column] = value
 		}
+		if err := checkRow(def, updated); err != nil {
+			return Result{}, err
+		}
 		updates = append(updates, updated)
+	}
+	if stmt.Returning != nil {
+		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := db.UpdateMany(stmt.Table, updates); err != nil {
 		return Result{}, err
+	}
+	if stmt.Returning != nil {
+		return returningResult(def, stmt.Returning, updates)
 	}
 	return Result{RowsAffected: len(matchesRows)}, nil
 }
@@ -216,19 +426,31 @@ func executeDelete(db *table.DB, stmt *DeleteStmt) (Result, error) {
 	for _, row := range matchesRows {
 		keys = append(keys, primaryKeyRecord(def, row))
 	}
+	if stmt.Returning != nil {
+		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
+	}
 	removed, err := db.DeleteMany(stmt.Table, keys)
 	if err != nil {
 		return Result{}, err
 	}
+	if stmt.Returning != nil {
+		return returningResult(def, stmt.Returning, matchesRows)
+	}
 	return Result{RowsAffected: removed}, nil
 }
 
+// evalResult is a value or a three-valued boolean: true, false, or unknown
+// (any comparison involving NULL).
 type evalResult struct {
-	value  table.Value
-	bool   bool
-	isBool bool
+	value   table.Value
+	bool    bool
+	unknown bool
+	isBool  bool
 }
 
+// evalWhere keeps a row only when the predicate is true, not unknown.
 func evalWhere(expr Expr, row table.Record) (bool, error) {
 	if expr == nil {
 		return true, nil
@@ -240,7 +462,32 @@ func evalWhere(expr Expr, row table.Record) (bool, error) {
 	if !value.isBool {
 		return false, fmt.Errorf("%w: where expression is not boolean", ErrExec)
 	}
-	return value.bool, nil
+	return value.bool && !value.unknown, nil
+}
+
+// logic applies SQL's three-valued AND or OR.
+func logic(op string, left, right evalResult) evalResult {
+	out := evalResult{isBool: true}
+	isFalse := func(r evalResult) bool { return !r.unknown && !r.bool }
+	isTrue := func(r evalResult) bool { return !r.unknown && r.bool }
+	switch op {
+	case "and":
+		switch {
+		case isFalse(left) || isFalse(right):
+		case left.unknown || right.unknown:
+			out.unknown = true
+		default:
+			out.bool = true
+		}
+	default: // or
+		switch {
+		case isTrue(left) || isTrue(right):
+			out.bool = true
+		case left.unknown || right.unknown:
+			out.unknown = true
+		}
+	}
+	return out
 }
 
 func evalExpr(expr Expr, row table.Record) (evalResult, error) {
@@ -266,10 +513,7 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 			if !left.isBool || !right.isBool {
 				return evalResult{}, fmt.Errorf("%w: logical operands must be boolean", ErrExec)
 			}
-			if expr.Op == "and" {
-				return evalResult{bool: left.bool && right.bool, isBool: true}, nil
-			}
-			return evalResult{bool: left.bool || right.bool, isBool: true}, nil
+			return logic(expr.Op, left, right), nil
 		}
 		left, err := evalExpr(expr.Left, row)
 		if err != nil {
@@ -279,34 +523,65 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 		if err != nil {
 			return evalResult{}, err
 		}
+		if left.value.IsNull() || right.value.IsNull() {
+			return evalResult{unknown: true, isBool: true}, nil
+		}
+		// A literal takes the type of the value it is compared with.
+		if lit, ok := expr.Left.(*Literal); ok {
+			if left.value, err = literalToValue(*lit, right.value.Type); err != nil {
+				return evalResult{}, err
+			}
+		}
+		if lit, ok := expr.Right.(*Literal); ok {
+			if right.value, err = literalToValue(*lit, left.value.Type); err != nil {
+				return evalResult{}, err
+			}
+		}
 		result, err := compareValues(left.value, right.value, expr.Op)
 		if err != nil {
 			return evalResult{}, err
 		}
 		return evalResult{bool: result, isBool: true}, nil
+	case *CastExpr:
+		to, err := sqlType(expr.Type)
+		if err != nil {
+			return evalResult{}, err
+		}
+		operand, err := evalExpr(expr.Expr, row)
+		if err != nil {
+			return evalResult{}, err
+		}
+		if operand.isBool {
+			return evalResult{}, fmt.Errorf("%w: CAST needs a value", ErrExec)
+		}
+		v := operand.value
+		if lit, ok := expr.Expr.(*Literal); ok && lit.Kind == LiteralString {
+			v = table.TextValue(lit.String) // a string literal casts as text
+		}
+		v, err = castValue(v, to)
+		if err != nil {
+			return evalResult{}, err
+		}
+		return evalResult{value: v}, nil
+	case *IsNullExpr:
+		operand, err := evalExpr(expr.Expr, row)
+		if err != nil {
+			return evalResult{}, err
+		}
+		if operand.isBool {
+			return evalResult{}, fmt.Errorf("%w: IS NULL needs a value", ErrExec)
+		}
+		return evalResult{bool: operand.value.IsNull() != expr.Not, isBool: true}, nil
 	default:
 		return evalResult{}, fmt.Errorf("%w: unknown expression", ErrExec)
 	}
 }
 
 func compareValues(left, right table.Value, op string) (bool, error) {
-	if left.Type != right.Type {
+	if left.Type != right.Type && !(left.Type.HasBytes() && right.Type.HasBytes()) {
 		return false, fmt.Errorf("%w: type mismatch", ErrExec)
 	}
-	var cmp int
-	switch left.Type {
-	case table.TypeInt64:
-		switch {
-		case left.I64 < right.I64:
-			cmp = -1
-		case left.I64 > right.I64:
-			cmp = 1
-		}
-	case table.TypeBytes:
-		cmp = bytes.Compare(left.Bytes, right.Bytes)
-	default:
-		return false, fmt.Errorf("%w: unsupported value type", ErrExec)
-	}
+	cmp := table.Compare(left, right)
 	switch op {
 	case "=":
 		return cmp == 0, nil
@@ -331,12 +606,25 @@ func literalUntyped(literal Literal) table.Value {
 		return table.Int64Value(literal.Int)
 	case LiteralString:
 		return table.BytesValue([]byte(literal.String))
+	case LiteralNull:
+		return table.NullValue()
+	case LiteralFloat:
+		return table.Float64Value(literal.Float)
+	case LiteralBool:
+		return table.BoolValue(literal.Bool)
+	case LiteralTimestamp:
+		return table.Value{Type: table.TypeTimestamp, I64: literal.Int}
 	default:
 		return table.Value{}
 	}
 }
 
+// literalToValue converts a literal to a column type. NULL converts to any
+// type; the table layer rejects it for columns that do not accept NULL.
 func literalToValue(literal Literal, valueType table.Type) (table.Value, error) {
+	if literal.Kind == LiteralNull {
+		return table.NullValue(), nil
+	}
 	switch valueType {
 	case table.TypeInt64:
 		if literal.Kind != LiteralInt {
@@ -348,6 +636,39 @@ func literalToValue(literal Literal, valueType table.Type) (table.Value, error) 
 			return table.Value{}, fmt.Errorf("%w: expected bytes literal", ErrExec)
 		}
 		return table.BytesValue([]byte(literal.String)), nil
+	case table.TypeText:
+		if literal.Kind != LiteralString {
+			return table.Value{}, fmt.Errorf("%w: expected text literal", ErrExec)
+		}
+		if !utf8.ValidString(literal.String) {
+			return table.Value{}, fmt.Errorf("%w: text must be valid UTF-8", table.ErrInvalidValue)
+		}
+		return table.TextValue(literal.String), nil
+	case table.TypeFloat64:
+		switch literal.Kind {
+		case LiteralFloat:
+			return table.Float64Value(literal.Float), nil
+		case LiteralInt:
+			return table.Float64Value(float64(literal.Int)), nil
+		}
+		return table.Value{}, fmt.Errorf("%w: expected float64 literal", ErrExec)
+	case table.TypeBool:
+		if literal.Kind != LiteralBool {
+			return table.Value{}, fmt.Errorf("%w: expected TRUE or FALSE", ErrExec)
+		}
+		return table.BoolValue(literal.Bool), nil
+	case table.TypeTimestamp:
+		switch literal.Kind {
+		case LiteralTimestamp:
+			return table.Value{Type: table.TypeTimestamp, I64: literal.Int}, nil
+		case LiteralString:
+			t, err := parseTimestamp(literal.String)
+			if err != nil {
+				return table.Value{}, err
+			}
+			return table.TimestampValue(t), nil
+		}
+		return table.Value{}, fmt.Errorf("%w: expected timestamp literal", ErrExec)
 	default:
 		return table.Value{}, fmt.Errorf("%w: unsupported column type", ErrExec)
 	}
@@ -355,10 +676,18 @@ func literalToValue(literal Literal, valueType table.Type) (table.Value, error) 
 
 func sqlType(name string) (table.Type, error) {
 	switch name {
-	case "bytes", "string", "text":
+	case "bytes", "blob":
 		return table.TypeBytes, nil
-	case "int64", "int":
+	case "text", "string", "varchar":
+		return table.TypeText, nil
+	case "int64", "int", "integer", "bigint":
 		return table.TypeInt64, nil
+	case "float64", "float", "double", "real":
+		return table.TypeFloat64, nil
+	case "bool", "boolean":
+		return table.TypeBool, nil
+	case "timestamp":
+		return table.TypeTimestamp, nil
 	default:
 		return 0, fmt.Errorf("%w: unsupported type %s", ErrExec, name)
 	}
@@ -400,7 +729,7 @@ func projectRow(row table.Record, columns []string) []table.Value {
 func candidateRows(db *table.DB, def table.TableDef, plan Plan) ([]table.Record, error) {
 	switch plan.Access {
 	case AccessPrimaryKeyLookup:
-		key, err := lookupRecord(plan.Lookup)
+		key, err := lookupRecord(def, plan.Lookup)
 		if err != nil {
 			return nil, err
 		}
@@ -413,7 +742,7 @@ func candidateRows(db *table.DB, def table.TableDef, plan Plan) ([]table.Record,
 		}
 		return []table.Record{row}, nil
 	case AccessSecondaryIndexLookup:
-		key, err := lookupRecord(plan.Lookup)
+		key, err := lookupRecord(def, plan.Lookup)
 		if err != nil {
 			return nil, err
 		}
@@ -449,27 +778,42 @@ func scanRows(db *table.DB, tableName string, bounds table.ScanBounds) ([]table.
 	return rows, nil
 }
 
-func lookupRecord(conditions []Condition) (table.Record, error) {
+func lookupRecord(def table.TableDef, conditions []Condition) (table.Record, error) {
 	values := make(map[string]table.Value, len(conditions))
 	for _, condition := range conditions {
-		values[condition.Column] = literalUntyped(condition.Literal)
+		value, err := conditionValue(def, condition)
+		if err != nil {
+			return table.Record{}, err
+		}
+		values[condition.Column] = value
 	}
 	return table.NewRecord(values), nil
+}
+
+// conditionValue converts a condition's literal to its column's type.
+func conditionValue(def table.TableDef, condition Condition) (table.Value, error) {
+	typ, ok := columnType(def, condition.Column)
+	if !ok {
+		return table.Value{}, fmt.Errorf("%w: unknown column %s", ErrExec, condition.Column)
+	}
+	return literalToValue(condition.Literal, typ)
 }
 
 func scanBoundsFromPlan(def table.TableDef, plan Plan) (table.ScanBounds, error) {
 	var bounds table.ScanBounds
 	if plan.Lower != nil {
-		bounds.Lower = &table.Bound{
-			Key:       table.NewRecord(map[string]table.Value{plan.Lower.Column: literalUntyped(plan.Lower.Literal)}),
-			Inclusive: plan.Lower.Op == ">=",
+		v, err := conditionValue(def, *plan.Lower)
+		if err != nil {
+			return bounds, err
 		}
+		bounds.Lower = &table.Bound{Key: table.NewRecord(map[string]table.Value{plan.Lower.Column: v}), Inclusive: plan.Lower.Op == ">="}
 	}
 	if plan.Upper != nil {
-		bounds.Upper = &table.Bound{
-			Key:       table.NewRecord(map[string]table.Value{plan.Upper.Column: literalUntyped(plan.Upper.Literal)}),
-			Inclusive: plan.Upper.Op == "<=",
+		v, err := conditionValue(def, *plan.Upper)
+		if err != nil {
+			return bounds, err
 		}
+		bounds.Upper = &table.Bound{Key: table.NewRecord(map[string]table.Value{plan.Upper.Column: v}), Inclusive: plan.Upper.Op == "<="}
 	}
 	return bounds, nil
 }

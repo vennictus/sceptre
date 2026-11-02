@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -25,6 +26,11 @@ const (
 	tokenGreater
 	tokenGreaterEqual
 	tokenParameter
+	tokenNull      // a NULL binding; the NULL keyword lexes as an identifier
+	tokenFloat     // a number with a fraction or exponent
+	tokenBool      // a bool binding; TRUE and FALSE lex as identifiers
+	tokenTimestamp // a timestamp binding: microseconds since the epoch
+	tokenDot
 )
 
 type token struct {
@@ -47,6 +53,9 @@ func lex(input string) ([]token, error) {
 			i++
 		case ',':
 			tokens = append(tokens, token{kind: tokenComma, text: ","})
+			i++
+		case '.':
+			tokens = append(tokens, token{kind: tokenDot, text: "."})
 			i++
 		case '(':
 			tokens = append(tokens, token{kind: tokenLParen, text: "("})
@@ -112,10 +121,38 @@ func lex(input string) ([]token, error) {
 				for i < len(input) && isDigit(input[i]) {
 					i++
 				}
-				if _, err := strconv.ParseInt(input[start:i], 10, 64); err != nil {
-					return nil, fmt.Errorf("%w: invalid integer %q", ErrParse, input[start:i])
+				isFloat := false
+				if i+1 < len(input) && input[i] == '.' && isDigit(input[i+1]) {
+					isFloat = true
+					i++
+					for i < len(input) && isDigit(input[i]) {
+						i++
+					}
 				}
-				tokens = append(tokens, token{kind: tokenNumber, text: input[start:i]})
+				if i < len(input) && (input[i] == 'e' || input[i] == 'E') {
+					j := i + 1
+					if j < len(input) && (input[j] == '+' || input[j] == '-') {
+						j++
+					}
+					if j < len(input) && isDigit(input[j]) {
+						isFloat = true
+						for i = j; i < len(input) && isDigit(input[i]); i++ {
+						}
+					}
+				}
+				text := input[start:i]
+				if isFloat {
+					f, err := strconv.ParseFloat(text, 64)
+					if err != nil || math.IsInf(f, 0) {
+						return nil, fmt.Errorf("%w: invalid number %q", ErrParse, text)
+					}
+					tokens = append(tokens, token{kind: tokenFloat, text: text})
+					continue
+				}
+				if _, err := strconv.ParseInt(text, 10, 64); err != nil {
+					return nil, fmt.Errorf("%w: invalid integer %q", ErrParse, text)
+				}
+				tokens = append(tokens, token{kind: tokenNumber, text: text})
 			default:
 				return nil, fmt.Errorf("%w: unexpected character %q", ErrParse, input[i])
 			}

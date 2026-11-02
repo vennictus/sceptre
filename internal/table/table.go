@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"time"
+	"unicode/utf8"
+
 	"github.com/vennictus/sceptre/internal/kv"
 )
 
@@ -14,6 +18,17 @@ type Type uint32
 const (
 	TypeBytes Type = 1
 	TypeInt64 Type = 2
+	TypeText  Type = 3 // UTF-8; stored and ordered like bytes
+	// TypeNull is the type of a NULL value. It is not a column type.
+	TypeNull      Type = 4
+	TypeFloat64   Type = 5 // finite IEEE 754 doubles; -0 is stored as 0
+	TypeBool      Type = 6
+	TypeTimestamp Type = 7 // microseconds since the Unix epoch, UTC
+
+	// RowFormatTagged stores each non-key column value with a NULL/present tag,
+	// in rows and in secondary index keys, and reads missing trailing columns
+	// as NULL. Tables created before it use format 0: untagged, no NULLs.
+	RowFormatTagged uint8 = 1
 
 	rowKeyPrefix       byte   = 0x10
 	indexKeyPrefix     byte   = 0x11
@@ -46,8 +61,17 @@ type Options struct {
 
 // Column defines one named table column.
 type Column struct {
-	Name string `json:"name"`
-	Type Type   `json:"type"`
+	Name     string `json:"name"`
+	Type     Type   `json:"type"`
+	Nullable bool   `json:"nullable,omitempty"`
+	// Default fills the column when an insert omits it, and is what rows
+	// written before the column was added read. DefaultNow fills inserts with
+	// the current time instead (timestamp columns).
+	Default    *Value `json:"default,omitempty"`
+	DefaultNow bool   `json:"default_now,omitempty"`
+	// AutoIncrement numbers inserts that omit the column; it must be the
+	// table's only primary-key column, of type int64.
+	AutoIncrement bool `json:"auto_increment,omitempty"`
 }
 
 // TableDef is the persisted schema for a table.
@@ -57,20 +81,30 @@ type TableDef struct {
 	PrimaryKey []string   `json:"primary_key"`
 	Prefix     uint32     `json:"prefix"`
 	Indexes    []IndexDef `json:"indexes,omitempty"`
+	RowFormat  uint8      `json:"row_format,omitempty"`
+	// Checks are SQL boolean expressions every row must not make false. The
+	// SQL layer enforces them; the table layer only stores them.
+	Checks []string `json:"checks,omitempty"`
 }
+
+func (def TableDef) tagged() bool { return def.RowFormat >= RowFormatTagged }
 
 // IndexDef is the persisted schema for a secondary index.
 type IndexDef struct {
 	Name    string   `json:"name"`
 	Columns []string `json:"columns"`
 	Prefix  uint32   `json:"prefix"`
+	// Unique rejects two rows with equal non-NULL values in all its columns.
+	Unique bool `json:"unique,omitempty"`
 }
 
 // Value stores one typed scalar value.
 type Value struct {
 	Type  Type
 	Bytes []byte
-	I64   int64
+	I64   int64 // int64 values, and timestamps in microseconds
+	F64   float64
+	Bool  bool
 }
 
 // Record is a row or primary-key tuple keyed by column name.
@@ -119,6 +153,36 @@ func BytesValue(value []byte) Value {
 }
 
 // Int64Value constructs a signed integer table value.
+// Float64Value returns a float64 value. NaN and infinities cannot be stored.
+func Float64Value(v float64) Value {
+	if v == 0 {
+		v = 0 // store -0 as 0 so equal values encode equally
+	}
+	return Value{Type: TypeFloat64, F64: v}
+}
+
+// BoolValue returns a bool value.
+func BoolValue(v bool) Value { return Value{Type: TypeBool, Bool: v} }
+
+// TimestampValue returns a timestamp, truncated to microseconds, in UTC.
+func TimestampValue(t time.Time) Value {
+	return Value{Type: TypeTimestamp, I64: t.UnixMicro()}
+}
+
+// Time returns a timestamp value as a UTC time.
+func (v Value) Time() time.Time { return time.UnixMicro(v.I64).UTC() }
+
+// NullValue returns the SQL NULL.
+func NullValue() Value { return Value{Type: TypeNull} }
+
+// IsNull reports whether v is NULL.
+func (v Value) IsNull() bool { return v.Type == TypeNull }
+
+// TextValue returns a text value. It must be valid UTF-8 to be stored.
+func TextValue(value string) Value {
+	return Value{Type: TypeText, Bytes: []byte(value)}
+}
+
 func Int64Value(value int64) Value {
 	return Value{Type: TypeInt64, I64: value}
 }
@@ -137,6 +201,7 @@ func (db *DB) CreateTable(def TableDef) error {
 	if db == nil || db.store == nil {
 		return ErrTableNotFound
 	}
+	def.RowFormat = RowFormatTagged
 	if err := validateTableDef(def, false); err != nil {
 		return err
 	}
@@ -210,6 +275,7 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 		return err
 	}
 	defer scanner.Close()
+	claimed := map[string]struct{}{}
 	for scanner.Valid() {
 		row, err := scanner.Deref()
 		if err != nil {
@@ -218,6 +284,14 @@ func (db *DB) CreateIndex(tableName string, index IndexDef) error {
 		key, err := encodeIndexKey(def, index, row)
 		if err != nil {
 			return err
+		}
+		if index.Unique {
+			if prefix, ok := uniquePrefix(def, index, row); ok {
+				if _, dup := claimed[string(prefix)]; dup {
+					return fmt.Errorf("%w: %s: existing rows have duplicate values", ErrUniqueViolation, index.Name)
+				}
+				claimed[string(prefix)] = struct{}{}
+			}
 		}
 		mutations = append(mutations, kv.Put(key, nil))
 		if err := scanner.Next(); err != nil {
@@ -352,6 +426,14 @@ func (db *DB) InsertMany(tableName string, records []Record) error {
 		}
 		mutations = append(mutations, puts...)
 	}
+	if err := db.checkUnique(def, records); err != nil {
+		return err
+	}
+	if seq, ok, err := db.advanceSequence(def, records); err != nil {
+		return err
+	} else if ok {
+		mutations = append(mutations, seq)
+	}
 	return db.store.Apply(mutations)
 }
 
@@ -386,6 +468,9 @@ func (db *DB) UpdateMany(tableName string, records []Record) error {
 		}
 		seen[string(key)] = struct{}{}
 		mutations = append(mutations, changes...)
+	}
+	if err := db.checkUnique(def, records); err != nil {
+		return err
 	}
 	return db.store.Apply(mutations)
 }
@@ -518,6 +603,14 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	if err != nil {
 		return err
 	}
+	if err := db.checkUnique(def, []Record{record}); err != nil {
+		return err
+	}
+	if seq, ok, err := db.advanceSequence(def, []Record{record}); err != nil {
+		return err
+	} else if ok {
+		mutations = append(mutations, seq)
+	}
 	return db.store.Apply(mutations)
 }
 
@@ -645,11 +738,26 @@ func validateTableDef(def TableDef, requirePrefix bool) error {
 	if requirePrefix && def.Prefix == 0 {
 		return ErrInvalidTableDef
 	}
+	if def.RowFormat > RowFormatTagged {
+		return ErrInvalidTableDef
+	}
 
 	columns := make(map[string]Type, len(def.Columns))
 	for _, column := range def.Columns {
 		if column.Name == "" || !validType(column.Type) {
 			return ErrInvalidTableDef
+		}
+		if column.Nullable && (!def.tagged() || isPrimaryKey(def, column.Name)) {
+			return ErrInvalidTableDef
+		}
+		if column.Default != nil && !valueAllowed(*column.Default, column) {
+			return fmt.Errorf("%w: default for %s does not fit the column", ErrInvalidTableDef, column.Name)
+		}
+		if column.DefaultNow && column.Type != TypeTimestamp {
+			return fmt.Errorf("%w: CURRENT_TIMESTAMP default needs a timestamp column", ErrInvalidTableDef)
+		}
+		if column.AutoIncrement && (column.Type != TypeInt64 || len(def.PrimaryKey) != 1 || def.PrimaryKey[0] != column.Name) {
+			return fmt.Errorf("%w: AUTOINCREMENT needs the table's only primary-key column, of type int64", ErrInvalidTableDef)
 		}
 		if _, exists := columns[column.Name]; exists {
 			return ErrInvalidTableDef
@@ -731,7 +839,7 @@ func validateFullRecord(def TableDef, record Record) error {
 		if !ok {
 			return ErrInvalidRecord
 		}
-		if !valueMatchesType(value, column.Type) {
+		if !valueAllowed(value, column) {
 			return ErrInvalidValue
 		}
 	}
@@ -807,7 +915,7 @@ func encodeRowValue(def TableDef, record Record) ([]byte, error) {
 		if isPrimaryKey(def, column.Name) {
 			continue
 		}
-		out = appendEncodedValue(out, record.Values[column.Name])
+		out = appendColumnValue(out, record.Values[column.Name], def.tagged())
 	}
 	return out, nil
 }
@@ -823,7 +931,12 @@ func decodeRowValue(def TableDef, key Record, data []byte) (Record, error) {
 		if isPrimaryKey(def, column.Name) {
 			continue
 		}
-		value, consumed, err := consumeEncodedValue(remaining, column.Type)
+		if len(remaining) == 0 && (column.Nullable || column.Default != nil) {
+			// Columns added after the row was written read their default.
+			values[column.Name] = missingValue(column)
+			continue
+		}
+		value, consumed, err := consumeColumnValue(remaining, column.Type, def.tagged())
 		if err != nil {
 			return Record{}, err
 		}
@@ -872,11 +985,11 @@ func encodeIndexKey(def TableDef, index IndexDef, record Record) ([]byte, error)
 	out := indexKeyStart(index)
 	for _, name := range index.Columns {
 		value := record.Values[name]
-		valueType, _ := columnType(def, name)
-		if !valueMatchesType(value, valueType) {
+		column, _ := findColumn(def, name)
+		if !valueAllowed(value, column) {
 			return nil, ErrInvalidValue
 		}
-		out = appendEncodedValue(out, value)
+		out = appendColumnValue(out, value, def.tagged())
 	}
 	for _, name := range def.PrimaryKey {
 		out = appendEncodedValue(out, record.Values[name])
@@ -891,7 +1004,7 @@ func encodeIndexLookupPrefix(def TableDef, index IndexDef, values Record) ([]byt
 
 	out := indexKeyStart(index)
 	for _, name := range index.Columns {
-		out = appendEncodedValue(out, values.Values[name])
+		out = appendColumnValue(out, values.Values[name], def.tagged())
 	}
 	return out, nil
 }
@@ -942,11 +1055,76 @@ func catalogTableKey(name string) []byte {
 }
 
 func validType(valueType Type) bool {
-	return valueType == TypeBytes || valueType == TypeInt64
+	switch valueType {
+	case TypeBytes, TypeInt64, TypeText, TypeFloat64, TypeBool, TypeTimestamp:
+		return true
+	}
+	return false
 }
 
 func valueMatchesType(value Value, valueType Type) bool {
-	return value.Type == valueType && validType(value.Type)
+	if value.Type != valueType || !validType(value.Type) {
+		return false
+	}
+	switch value.Type {
+	case TypeText:
+		return utf8.Valid(value.Bytes)
+	case TypeFloat64:
+		return !math.IsNaN(value.F64) && !math.IsInf(value.F64, 0)
+	}
+	return true
+}
+
+// String returns the SQL name of the type.
+func (t Type) String() string {
+	switch t {
+	case TypeBytes:
+		return "bytes"
+	case TypeInt64:
+		return "int64"
+	case TypeText:
+		return "text"
+	case TypeNull:
+		return "null"
+	case TypeFloat64:
+		return "float64"
+	case TypeBool:
+		return "bool"
+	case TypeTimestamp:
+		return "timestamp"
+	}
+	return fmt.Sprintf("type(%d)", uint32(t))
+}
+
+// IsNumeric reports whether the type is int64 or float64.
+func (t Type) IsNumeric() bool { return t == TypeInt64 || t == TypeFloat64 }
+
+// HasBytes reports whether values of the type keep their data in Value.Bytes.
+func (t Type) HasBytes() bool { return t == TypeBytes || t == TypeText }
+
+// missingValue is what a row written before column existed reads.
+func missingValue(column Column) Value {
+	if column.Default != nil {
+		return cloneValue(*column.Default)
+	}
+	return NullValue()
+}
+
+// valueAllowed reports whether value may be stored in column.
+func valueAllowed(value Value, column Column) bool {
+	if value.Type == TypeNull {
+		return column.Nullable
+	}
+	return valueMatchesType(value, column.Type)
+}
+
+func findColumn(def TableDef, name string) (Column, bool) {
+	for _, column := range def.Columns {
+		if column.Name == name {
+			return column, true
+		}
+	}
+	return Column{}, false
 }
 
 func columnType(def TableDef, name string) (Type, bool) {
@@ -992,6 +1170,8 @@ func cloneTableDef(def TableDef) TableDef {
 		Columns:    append([]Column(nil), def.Columns...),
 		PrimaryKey: append([]string(nil), def.PrimaryKey...),
 		Indexes:    make([]IndexDef, 0, len(def.Indexes)),
+		RowFormat:  def.RowFormat,
+		Checks:     append([]string(nil), def.Checks...),
 	}
 	for _, index := range def.Indexes {
 		out.Indexes = append(out.Indexes, cloneIndexDef(index))
@@ -1004,11 +1184,12 @@ func cloneIndexDef(index IndexDef) IndexDef {
 		Name:    index.Name,
 		Prefix:  index.Prefix,
 		Columns: append([]string(nil), index.Columns...),
+		Unique:  index.Unique,
 	}
 }
 
 func cloneValue(value Value) Value {
-	if value.Type == TypeBytes {
+	if value.Type.HasBytes() {
 		value.Bytes = cloneBytes(value.Bytes)
 	}
 	return value
