@@ -12,6 +12,7 @@ type ColumnDef struct {
 	Unique     bool
 	Default    *Literal
 	DefaultNow bool // DEFAULT CURRENT_TIMESTAMP
+	Checks     []Expr
 }
 
 type CreateTableStmt struct {
@@ -19,6 +20,7 @@ type CreateTableStmt struct {
 	Columns     []ColumnDef
 	PrimaryKey  []string
 	IfNotExists bool
+	Checks      []Expr // table-level CHECK constraints
 }
 
 func (*CreateTableStmt) statementNode() {}

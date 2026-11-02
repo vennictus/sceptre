@@ -72,9 +72,32 @@ func executeAlterTable(db *table.DB, stmt *AlterTableStmt) (Result, error) {
 		}
 		return Result{}, nil
 	case stmt.Drop != "":
+		def, ok, err := db.Table(stmt.Table)
+		if err != nil {
+			return Result{}, err
+		}
+		if ok {
+			if refs := checksReferencing(def, stmt.Drop); len(refs) > 0 {
+				return Result{}, fmt.Errorf("%w: column %s is used by CHECK %s", ErrExec, stmt.Drop, refs[0])
+			}
+		}
 		return Result{}, db.DropColumn(stmt.Table, stmt.Drop)
 	case stmt.RenameFrom != "":
-		return Result{}, db.RenameColumn(stmt.Table, stmt.RenameFrom, stmt.RenameTo)
+		def, ok, err := db.Table(stmt.Table)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := db.RenameColumn(stmt.Table, stmt.RenameFrom, stmt.RenameTo); err != nil {
+			return Result{}, err
+		}
+		if !ok || len(def.Checks) == 0 {
+			return Result{}, nil
+		}
+		checks, err := renameInChecks(def.Checks, stmt.RenameFrom, stmt.RenameTo)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{}, db.SetChecks(stmt.Table, checks)
 	default:
 		return Result{}, db.RenameTable(stmt.Table, stmt.RenameTo)
 	}

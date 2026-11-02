@@ -66,13 +66,20 @@ func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
 		Columns:    make([]table.Column, 0, len(stmt.Columns)),
 		PrimaryKey: append([]string(nil), stmt.PrimaryKey...),
 	}
+	checks := append([]Expr(nil), stmt.Checks...)
 	for _, column := range stmt.Columns {
 		c, err := tableColumn(column, slices.Contains(stmt.PrimaryKey, column.Name))
 		if err != nil {
 			return Result{}, err
 		}
 		def.Columns = append(def.Columns, c)
+		checks = append(checks, column.Checks...)
 	}
+	stored, err := checkStrings(def, checks)
+	if err != nil {
+		return Result{}, err
+	}
+	def.Checks = stored
 	if err := db.CreateTable(def); err != nil {
 		return Result{}, err
 	}
@@ -171,6 +178,9 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 	if err := fillDefaults(def, values, time.Now()); err != nil {
 		return Result{}, err
 	}
+	if err := checkRow(def, table.NewRecord(values)); err != nil {
+		return Result{}, err
+	}
 	if err := db.Insert(stmt.Table, table.NewRecord(values)); err != nil {
 		return Result{}, err
 	}
@@ -252,6 +262,9 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 		updated := table.NewRecord(row.Values)
 		for column, value := range assignments {
 			updated.Values[column] = value
+		}
+		if err := checkRow(def, updated); err != nil {
+			return Result{}, err
 		}
 		updates = append(updates, updated)
 	}

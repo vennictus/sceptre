@@ -216,8 +216,15 @@ func (p *parser) parseCreateTable() (Statement, error) {
 
 	var columns []ColumnDef
 	var primaryKey []string
+	var checks []Expr
 	for {
-		if p.matchKeyword("primary") {
+		if p.matchKeyword("check") {
+			expr, err := p.parseParenExpr()
+			if err != nil {
+				return nil, err
+			}
+			checks = append(checks, expr)
+		} else if p.matchKeyword("primary") {
 			if err := p.expectKeyword("key"); err != nil {
 				return nil, err
 			}
@@ -250,7 +257,36 @@ func (p *parser) parseCreateTable() (Statement, error) {
 	if err := p.expect(tokenRParen); err != nil {
 		return nil, err
 	}
-	return &CreateTableStmt{Name: name, Columns: columns, PrimaryKey: primaryKey, IfNotExists: ifNotExists}, nil
+	return &CreateTableStmt{Name: name, Columns: columns, PrimaryKey: primaryKey, IfNotExists: ifNotExists, Checks: checks}, nil
+}
+
+// parseParenExpr reads ( expr ).
+func (p *parser) parseParenExpr() (Expr, error) {
+	if err := p.expect(tokenLParen); err != nil {
+		return nil, err
+	}
+	expr, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return expr, p.expect(tokenRParen)
+}
+
+// ParseExpr parses one boolean or value expression, as stored for CHECK.
+func ParseExpr(input string) (Expr, error) {
+	tokens, err := lex(input)
+	if err != nil {
+		return nil, err
+	}
+	p := &parser{tokens: tokens}
+	expr, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if !p.at(tokenEOF) {
+		return nil, p.errorf("unexpected token %q", p.peek().text)
+	}
+	return expr, nil
 }
 
 // parseColumnConstraints reads NOT NULL, NULL and UNIQUE in any order.
@@ -265,6 +301,12 @@ func (p *parser) parseColumnConstraints(column *ColumnDef) error {
 		case p.matchKeyword("null"):
 		case p.matchKeyword("unique"):
 			column.Unique = true
+		case p.matchKeyword("check"):
+			expr, err := p.parseParenExpr()
+			if err != nil {
+				return err
+			}
+			column.Checks = append(column.Checks, expr)
 		case p.matchKeyword("default"):
 			if p.matchKeyword("current_timestamp") {
 				column.DefaultNow = true
