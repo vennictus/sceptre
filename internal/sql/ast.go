@@ -87,12 +87,17 @@ const (
 	LiteralInt LiteralKind = iota + 1
 	LiteralString
 	LiteralNull
+	LiteralFloat
+	LiteralBool
+	LiteralTimestamp // Int holds microseconds since the epoch
 )
 
 type Literal struct {
 	Kind   LiteralKind
 	Int    int64
 	String string
+	Float  float64
+	Bool   bool
 }
 
 func (*Literal) exprNode() {}

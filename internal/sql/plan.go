@@ -1,9 +1,10 @@
 package sql
 
 import (
-	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vennictus/sceptre/internal/table"
 )
@@ -323,18 +324,9 @@ func compareLowerBound(valueType table.Type, left, right Condition) int {
 	if err != nil {
 		return 0
 	}
-	switch valueType {
-	case table.TypeInt64:
-		switch {
-		case leftValue.I64 < rightValue.I64:
-			return -1
-		case leftValue.I64 > rightValue.I64:
-			return 1
-		}
-	case table.TypeBytes, table.TypeText:
-		return bytes.Compare(leftValue.Bytes, rightValue.Bytes)
+	if c := table.Compare(leftValue, rightValue); c != 0 {
+		return c
 	}
-
 	if left.Op == right.Op {
 		return 0
 	}
@@ -353,18 +345,9 @@ func compareUpperBound(valueType table.Type, left, right Condition) int {
 	if err != nil {
 		return 0
 	}
-	switch valueType {
-	case table.TypeInt64:
-		switch {
-		case leftValue.I64 < rightValue.I64:
-			return -1
-		case leftValue.I64 > rightValue.I64:
-			return 1
-		}
-	case table.TypeBytes, table.TypeText:
-		return bytes.Compare(leftValue.Bytes, rightValue.Bytes)
+	if c := table.Compare(leftValue, rightValue); c != 0 {
+		return c
 	}
-
 	if left.Op == right.Op {
 		return 0
 	}
@@ -434,6 +417,15 @@ func FormatLiteral(literal Literal) string {
 		return fmt.Sprintf("'%s'", strings.ReplaceAll(literal.String, "'", "''"))
 	case LiteralNull:
 		return "NULL"
+	case LiteralFloat:
+		return strconv.FormatFloat(literal.Float, 'g', -1, 64)
+	case LiteralBool:
+		if literal.Bool {
+			return "TRUE"
+		}
+		return "FALSE"
+	case LiteralTimestamp:
+		return "'" + time.UnixMicro(literal.Int).UTC().Format(time.RFC3339Nano) + "'"
 	default:
 		return "<literal>"
 	}

@@ -492,7 +492,7 @@ func (p *parser) parsePrimary() (Expr, error) {
 		}
 		return expr, nil
 	}
-	if p.at(tokenIdent) && !p.atNull() {
+	if p.at(tokenIdent) && !p.atNull() && !p.atBool() {
 		name := p.next().text
 		return &IdentExpr{Name: name}, nil
 	}
@@ -565,13 +565,34 @@ func (p *parser) expectLiteral() (Literal, error) {
 		return Literal{Kind: LiteralInt, Int: value}, nil
 	case tokenString:
 		return Literal{Kind: LiteralString, String: p.next().text}, nil
+	case tokenFloat:
+		f, err := strconv.ParseFloat(p.next().text, 64)
+		if err != nil {
+			return Literal{}, fmt.Errorf("%w: invalid number", ErrParse)
+		}
+		return Literal{Kind: LiteralFloat, Float: f}, nil
+	case tokenTimestamp:
+		micros, err := strconv.ParseInt(p.next().text, 10, 64)
+		if err != nil {
+			return Literal{}, fmt.Errorf("%w: invalid timestamp binding", ErrParse)
+		}
+		return Literal{Kind: LiteralTimestamp, Int: micros}, nil
 	default:
 		if p.atNull() {
 			p.next()
 			return Literal{Kind: LiteralNull}, nil
 		}
+		if p.atBool() {
+			return Literal{Kind: LiteralBool, Bool: strings.EqualFold(p.next().text, "true")}, nil
+		}
 		return Literal{}, p.errorf("expected literal")
 	}
+}
+
+// atBool reports whether the next token is TRUE or FALSE: a keyword or a binding.
+func (p *parser) atBool() bool {
+	tok := p.peek()
+	return tok.kind == tokenBool || tok.kind == tokenIdent && (strings.EqualFold(tok.text, "true") || strings.EqualFold(tok.text, "false"))
 }
 
 // atNull reports whether the next token is NULL: the keyword or a binding.

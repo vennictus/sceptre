@@ -1,7 +1,6 @@
 package sql
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -347,6 +346,17 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 		if left.value.IsNull() || right.value.IsNull() {
 			return evalResult{unknown: true, isBool: true}, nil
 		}
+		// A literal takes the type of the value it is compared with.
+		if lit, ok := expr.Left.(*Literal); ok {
+			if left.value, err = literalToValue(*lit, right.value.Type); err != nil {
+				return evalResult{}, err
+			}
+		}
+		if lit, ok := expr.Right.(*Literal); ok {
+			if right.value, err = literalToValue(*lit, left.value.Type); err != nil {
+				return evalResult{}, err
+			}
+		}
 		result, err := compareValues(left.value, right.value, expr.Op)
 		if err != nil {
 			return evalResult{}, err
@@ -367,24 +377,10 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 }
 
 func compareValues(left, right table.Value, op string) (bool, error) {
-	// A string literal evaluates as bytes; validation allows it against text.
 	if left.Type != right.Type && !(left.Type.HasBytes() && right.Type.HasBytes()) {
 		return false, fmt.Errorf("%w: type mismatch", ErrExec)
 	}
-	var cmp int
-	switch left.Type {
-	case table.TypeInt64:
-		switch {
-		case left.I64 < right.I64:
-			cmp = -1
-		case left.I64 > right.I64:
-			cmp = 1
-		}
-	case table.TypeBytes, table.TypeText:
-		cmp = bytes.Compare(left.Bytes, right.Bytes)
-	default:
-		return false, fmt.Errorf("%w: unsupported value type", ErrExec)
-	}
+	cmp := table.Compare(left, right)
 	switch op {
 	case "=":
 		return cmp == 0, nil
@@ -411,6 +407,12 @@ func literalUntyped(literal Literal) table.Value {
 		return table.BytesValue([]byte(literal.String))
 	case LiteralNull:
 		return table.NullValue()
+	case LiteralFloat:
+		return table.Float64Value(literal.Float)
+	case LiteralBool:
+		return table.BoolValue(literal.Bool)
+	case LiteralTimestamp:
+		return table.Value{Type: table.TypeTimestamp, I64: literal.Int}
 	default:
 		return table.Value{}
 	}
@@ -441,6 +443,31 @@ func literalToValue(literal Literal, valueType table.Type) (table.Value, error) 
 			return table.Value{}, fmt.Errorf("%w: text must be valid UTF-8", table.ErrInvalidValue)
 		}
 		return table.TextValue(literal.String), nil
+	case table.TypeFloat64:
+		switch literal.Kind {
+		case LiteralFloat:
+			return table.Float64Value(literal.Float), nil
+		case LiteralInt:
+			return table.Float64Value(float64(literal.Int)), nil
+		}
+		return table.Value{}, fmt.Errorf("%w: expected float64 literal", ErrExec)
+	case table.TypeBool:
+		if literal.Kind != LiteralBool {
+			return table.Value{}, fmt.Errorf("%w: expected TRUE or FALSE", ErrExec)
+		}
+		return table.BoolValue(literal.Bool), nil
+	case table.TypeTimestamp:
+		switch literal.Kind {
+		case LiteralTimestamp:
+			return table.Value{Type: table.TypeTimestamp, I64: literal.Int}, nil
+		case LiteralString:
+			t, err := parseTimestamp(literal.String)
+			if err != nil {
+				return table.Value{}, err
+			}
+			return table.TimestampValue(t), nil
+		}
+		return table.Value{}, fmt.Errorf("%w: expected timestamp literal", ErrExec)
 	default:
 		return table.Value{}, fmt.Errorf("%w: unsupported column type", ErrExec)
 	}
@@ -452,8 +479,14 @@ func sqlType(name string) (table.Type, error) {
 		return table.TypeBytes, nil
 	case "text", "string", "varchar":
 		return table.TypeText, nil
-	case "int64", "int":
+	case "int64", "int", "integer", "bigint":
 		return table.TypeInt64, nil
+	case "float64", "float", "double", "real":
+		return table.TypeFloat64, nil
+	case "bool", "boolean":
+		return table.TypeBool, nil
+	case "timestamp":
+		return table.TypeTimestamp, nil
 	default:
 		return 0, fmt.Errorf("%w: unsupported type %s", ErrExec, name)
 	}
