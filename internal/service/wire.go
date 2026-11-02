@@ -3,7 +3,9 @@ package service
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strconv"
+	"time"
 	"unicode/utf8"
 
 	"github.com/vennictus/sceptre"
@@ -29,6 +31,24 @@ func (v Scalar) decode() (sceptre.Value, error) {
 			return sceptre.Value{}, fmt.Errorf("invalid base64 binding")
 		}
 		return sceptre.Bytes(b), nil
+	case "float64":
+		f, err := strconv.ParseFloat(v.Value, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return sceptre.Value{}, fmt.Errorf("invalid float64 binding")
+		}
+		return sceptre.Float64(f), nil
+	case "bool":
+		b, err := strconv.ParseBool(v.Value)
+		if err != nil || (v.Value != "true" && v.Value != "false") {
+			return sceptre.Value{}, fmt.Errorf("bool binding must be true or false")
+		}
+		return sceptre.Bool(b), nil
+	case "timestamp":
+		t, err := time.Parse(time.RFC3339Nano, v.Value)
+		if err != nil {
+			return sceptre.Value{}, fmt.Errorf("timestamp binding must be RFC 3339")
+		}
+		return sceptre.Timestamp(t), nil
 	case "null":
 		if v.Value != "" {
 			return sceptre.Value{}, fmt.Errorf("null binding takes no value")
@@ -40,7 +60,7 @@ func (v Scalar) decode() (sceptre.Value, error) {
 		}
 		return sceptre.Text(v.Value), nil
 	default:
-		return sceptre.Value{}, fmt.Errorf("binding type must be int64, bytes, text or null")
+		return sceptre.Value{}, fmt.Errorf("binding type must be int64, float64, bool, timestamp, bytes, text or null")
 	}
 }
 
@@ -53,6 +73,12 @@ func scalar(v sceptre.Value) Scalar {
 		return Scalar{Type: "text", Value: string(v.Bytes)}
 	case sceptre.TypeNull:
 		return Scalar{Type: "null"}
+	case sceptre.TypeFloat64:
+		return Scalar{Type: "float64", Value: strconv.FormatFloat(v.F64, 'g', -1, 64)}
+	case sceptre.TypeBool:
+		return Scalar{Type: "bool", Value: strconv.FormatBool(v.Bool)}
+	case sceptre.TypeTimestamp:
+		return Scalar{Type: "timestamp", Value: v.Time().Format(time.RFC3339Nano)}
 	}
 	return Scalar{Type: "bytes", Value: base64.StdEncoding.EncodeToString(v.Bytes)}
 }

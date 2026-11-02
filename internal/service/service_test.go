@@ -487,3 +487,22 @@ func TestNullValuesOnTheWire(t *testing.T) {
 		t.Fatalf("null binding with a value: %d", r.Status)
 	}
 }
+
+func TestFloatBoolTimestampOnTheWire(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.mustSQL("CREATE TABLE ev (id int64, score float64, done bool, at timestamp, PRIMARY KEY (id))")
+	body := `{"sql":"INSERT INTO ev (id, score, done, at) VALUES (1, ?, ?, ?)","params":[{"type":"float64","value":"0.1"},{"type":"bool","value":"true"},{"type":"timestamp","value":"2026-11-02T10:00:00.5Z"}]}`
+	if r := f.call("/api/execute", body, nil); r.Status != 200 {
+		t.Fatalf("insert: %d %+v", r.Status, r.Body.Error)
+	}
+	r := f.sql("/api/execute", "SELECT score, done, at FROM ev", nil)
+	row := r.Body.Result.Rows[0]
+	if row[0] != (Scalar{"float64", "0.1"}) || row[1] != (Scalar{"bool", "true"}) || row[2] != (Scalar{"timestamp", "2026-11-02T10:00:00.5Z"}) {
+		t.Fatalf("row = %+v", row)
+	}
+	for _, p := range []string{`{"type":"float64","value":"NaN"}`, `{"type":"bool","value":"1"}`, `{"type":"timestamp","value":"yesterday"}`} {
+		if r := f.call("/api/execute", `{"sql":"SELECT * FROM ev WHERE id = ?","params":[`+p+`]}`, nil); r.Status != 400 {
+			t.Fatalf("binding %s: %d", p, r.Status)
+		}
+	}
+}
