@@ -37,10 +37,13 @@ type CreateIndexStmt struct {
 
 func (*CreateIndexStmt) statementNode() {}
 
+// InsertStmt is INSERT INTO table [(columns)] followed by VALUES rows or a
+// SELECT. Without a column list, values fill every column in order.
 type InsertStmt struct {
 	Table   string
 	Columns []string
-	Values  []Literal
+	Rows    [][]Literal
+	Select  *SelectStmt
 }
 
 func (*InsertStmt) statementNode() {}

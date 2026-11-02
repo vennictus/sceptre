@@ -63,8 +63,8 @@ func TestParseInsert(t *testing.T) {
 	if insert.Table != "users" {
 		t.Fatalf("Table = %q, want users", insert.Table)
 	}
-	if len(insert.Values) != 2 || insert.Values[0].Int != -7 || insert.Values[1].String != "Ada's" {
-		t.Fatalf("Values = %+v", insert.Values)
+	if len(insert.Rows[0]) != 2 || insert.Rows[0][0].Int != -7 || insert.Rows[0][1].String != "Ada's" {
+		t.Fatalf("Rows = %+v", insert.Rows)
 	}
 }
 

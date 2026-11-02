@@ -370,21 +370,39 @@ func (p *parser) parseInsert() (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	columns, err := p.parseIdentListInParens()
-	if err != nil {
-		return nil, err
+	stmt := &InsertStmt{Table: table}
+	if p.at(tokenLParen) {
+		if stmt.Columns, err = p.parseIdentListInParens(); err != nil {
+			return nil, err
+		}
+	}
+	if p.matchKeyword("select") {
+		sel, err := p.parseSelect()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Select = sel.(*SelectStmt)
+		return stmt, nil
 	}
 	if err := p.expectKeyword("values"); err != nil {
 		return nil, err
 	}
-	values, err := p.parseLiteralListInParens()
-	if err != nil {
-		return nil, err
+	for {
+		row, err := p.parseLiteralListInParens()
+		if err != nil {
+			return nil, err
+		}
+		if stmt.Columns != nil && len(row) != len(stmt.Columns) {
+			return nil, p.errorf("column/value count mismatch")
+		}
+		if len(stmt.Rows) > 0 && len(row) != len(stmt.Rows[0]) {
+			return nil, p.errorf("rows have different lengths")
+		}
+		stmt.Rows = append(stmt.Rows, row)
+		if !p.match(tokenComma) {
+			return stmt, nil
+		}
 	}
-	if len(columns) != len(values) {
-		return nil, p.errorf("column/value count mismatch")
-	}
-	return &InsertStmt{Table: table, Columns: columns, Values: values}, nil
 }
 
 func (p *parser) parseSelect() (Statement, error) {

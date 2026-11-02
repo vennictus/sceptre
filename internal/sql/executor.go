@@ -179,9 +179,6 @@ func executeCreateIndex(db *table.DB, stmt *CreateIndexStmt) (Result, error) {
 }
 
 func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
-	if len(stmt.Columns) == 0 || len(stmt.Columns) != len(stmt.Values) {
-		return Result{}, fmt.Errorf("%w: column/value count mismatch", ErrExec)
-	}
 	def, ok, err := db.Table(stmt.Table)
 	if err != nil {
 		return Result{}, err
@@ -189,35 +186,112 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 	if !ok {
 		return Result{}, table.ErrTableNotFound
 	}
-
-	values := make(map[string]table.Value, len(stmt.Columns))
-	for i, column := range stmt.Columns {
-		if _, exists := values[column]; exists {
-			return Result{}, fmt.Errorf("%w: duplicate insert column %s", ErrExec, column)
-		}
-		valueType, ok := columnType(def, column)
-		if !ok {
-			return Result{}, fmt.Errorf("%w: unknown column %s", ErrExec, column)
-		}
-		value, err := literalToValue(stmt.Values[i], valueType)
-		if err != nil {
+	columns, err := insertColumns(def, stmt.Columns)
+	if err != nil {
+		return Result{}, err
+	}
+	rows, err := insertRows(db, def, columns, stmt)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(rows) == 0 {
+		return Result{}, nil
+	}
+	if err := fillAutoIncrement(db, def, rows); err != nil {
+		return Result{}, err
+	}
+	now := time.Now()
+	records := make([]table.Record, len(rows))
+	for i, values := range rows {
+		if err := fillDefaults(def, values, now); err != nil {
 			return Result{}, err
 		}
-		values[column] = value
+		records[i] = table.NewRecord(values)
+		if err := checkRow(def, records[i]); err != nil {
+			return Result{}, err
+		}
 	}
-	if err := fillAutoIncrement(db, def, []map[string]table.Value{values}); err != nil {
+	if err := db.InsertMany(stmt.Table, records); err != nil {
 		return Result{}, err
 	}
-	if err := fillDefaults(def, values, time.Now()); err != nil {
-		return Result{}, err
+	return Result{RowsAffected: len(records)}, nil
+}
+
+// insertColumns resolves an INSERT column list; none means every column.
+func insertColumns(def table.TableDef, names []string) ([]table.Column, error) {
+	if names == nil {
+		return append([]table.Column(nil), def.Columns...), nil
 	}
-	if err := checkRow(def, table.NewRecord(values)); err != nil {
-		return Result{}, err
+	if len(names) == 0 {
+		return nil, fmt.Errorf("%w: column/value count mismatch", ErrExec)
 	}
-	if err := db.Insert(stmt.Table, table.NewRecord(values)); err != nil {
-		return Result{}, err
+	seen := make(map[string]bool, len(names))
+	out := make([]table.Column, 0, len(names))
+	for _, name := range names {
+		if seen[name] {
+			return nil, fmt.Errorf("%w: duplicate insert column %s", ErrExec, name)
+		}
+		seen[name] = true
+		var found bool
+		for _, c := range def.Columns {
+			if c.Name == name {
+				out = append(out, c)
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: unknown column %s", ErrExec, name)
+		}
 	}
-	return Result{RowsAffected: 1}, nil
+	return out, nil
+}
+
+// insertRows builds the value maps an INSERT writes, from VALUES literals or
+// from the rows of its SELECT, matched to columns by position.
+func insertRows(db *table.DB, def table.TableDef, columns []table.Column, stmt *InsertStmt) ([]map[string]table.Value, error) {
+	if stmt.Select != nil {
+		res, err := executeSelect(db, stmt.Select)
+		if err != nil {
+			return nil, err
+		}
+		if len(res.Columns) != len(columns) {
+			return nil, fmt.Errorf("%w: SELECT returns %d columns for %d", ErrExec, len(res.Columns), len(columns))
+		}
+		rows := make([]map[string]table.Value, len(res.Rows))
+		for i, src := range res.Rows {
+			rows[i] = make(map[string]table.Value, len(columns))
+			for j, c := range columns {
+				v := src[j]
+				if !v.IsNull() && v.Type != c.Type {
+					if v.Type == table.TypeInt64 && c.Type == table.TypeFloat64 {
+						v = table.Float64Value(float64(v.I64))
+					} else {
+						return nil, fmt.Errorf("%w: SELECT column %d is %s, %s is %s", ErrExec, j+1, v.Type, c.Name, c.Type)
+					}
+				}
+				rows[i][c.Name] = v
+			}
+		}
+		return rows, nil
+	}
+	if len(stmt.Rows) == 0 {
+		return nil, fmt.Errorf("%w: column/value count mismatch", ErrExec)
+	}
+	rows := make([]map[string]table.Value, len(stmt.Rows))
+	for i, literals := range stmt.Rows {
+		if len(literals) != len(columns) {
+			return nil, fmt.Errorf("%w: column/value count mismatch", ErrExec)
+		}
+		rows[i] = make(map[string]table.Value, len(columns))
+		for j, c := range columns {
+			v, err := literalToValue(literals[j], c.Type)
+			if err != nil {
+				return nil, err
+			}
+			rows[i][c.Name] = v
+		}
+	}
+	return rows, nil
 }
 
 func executeSelect(db *table.DB, stmt *SelectStmt) (Result, error) {

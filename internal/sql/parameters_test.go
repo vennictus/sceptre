@@ -15,7 +15,7 @@ func TestParameterTokenBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	insert := stmt.(*InsertStmt)
-	if insert.Values[0].Int != -1 || insert.Values[1].String != "' ?\x00\xff; SELECT" {
+	if insert.Rows[0][0].Int != -1 || insert.Rows[0][1].String != "' ?\x00\xff; SELECT" {
 		t.Fatal(insert)
 	}
 	stmt, err = ParseParameters("select * from t where body='?' and id=? LIMIT ? OFFSET ?", []table.Value{table.Int64Value(3), table.Int64Value(2), table.Int64Value(1)})
@@ -45,7 +45,7 @@ func FuzzParameterBytes(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := stmt.(*InsertStmt).Values[0]
+		got := stmt.(*InsertStmt).Rows[0][0]
 		if got.Kind != LiteralString || !bytes.Equal([]byte(got.String), v) {
 			t.Fatal("binding changed bytes or grammar")
 		}
