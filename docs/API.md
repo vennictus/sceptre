@@ -50,7 +50,9 @@ changes through one KV batch; rollback discards all of them. Empty transactions
 do not publish a generation.
 
 A failed statement preserves earlier successful statements and leaves the
-transaction usable. A failed statement does not partially stage its own changes.
+transaction usable. A failed statement does not partially stage its own changes:
+each runs under an internal savepoint, including statements that write in several
+steps such as an upsert.
 **Commit ends the transaction on every outcome**, including canceled commit and
 definitely aborted storage errors. Start a new transaction if retry is appropriate.
 Repeated rollback is safe; execution and repeated commit after completion return
@@ -148,8 +150,10 @@ at a time, and its methods are safe for concurrent calls. Repeated Close is safe
 
 ## Typed bindings and bounds
 
-Use positional `?` bindings with `sceptre.Int64`, `sceptre.Bytes`, `sceptre.Text`
-or `sceptre.Null`. A Bytes binding is accepted by a text column when it is valid
+Use positional `?` bindings with `sceptre.Int64`, `sceptre.Float64`,
+`sceptre.Bool`, `sceptre.Text`, `sceptre.Bytes`, `sceptre.Timestamp` or
+`sceptre.Null`; read timestamps back with `Value.Time` (UTC). See the
+[SQL support matrix](SQL.md) for the SQL these bindings fill. A Bytes binding is accepted by a text column when it is valid
 UTF-8. Results report NULL as a Value whose `IsNull` is true. Bindings become
 typed literal tokens; their contents are never parsed as SQL text. Quotes, question
 marks, NUL, and arbitrary bytes survive unchanged. Question marks inside SQL string
