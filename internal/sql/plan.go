@@ -399,6 +399,8 @@ func FormatExpr(expr Expr) string {
 			return fmt.Sprintf("(%s %s %s)", left, strings.ToUpper(expr.Op), right)
 		}
 		return fmt.Sprintf("%s %s %s", left, expr.Op, right)
+	case *CastExpr:
+		return "CAST(" + FormatExpr(expr.Expr) + " AS " + expr.Type + ")"
 	case *IsNullExpr:
 		if expr.Not {
 			return FormatExpr(expr.Expr) + " IS NOT NULL"

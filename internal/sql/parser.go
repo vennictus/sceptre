@@ -492,6 +492,24 @@ func (p *parser) parsePrimary() (Expr, error) {
 		}
 		return expr, nil
 	}
+	if p.at(tokenIdent) && strings.EqualFold(p.peek().text, "cast") && p.tokens[p.pos+1].kind == tokenLParen {
+		p.pos += 2
+		operand, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectKeyword("as"); err != nil {
+			return nil, err
+		}
+		typeName, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expect(tokenRParen); err != nil {
+			return nil, err
+		}
+		return &CastExpr{Expr: operand, Type: strings.ToLower(typeName)}, nil
+	}
 	if p.at(tokenIdent) && !p.atNull() && !p.atBool() {
 		name := p.next().text
 		return &IdentExpr{Name: name}, nil

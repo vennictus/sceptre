@@ -84,6 +84,22 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 		case LiteralInt, LiteralString, LiteralFloat, LiteralBool, LiteralTimestamp:
 			return expressionType{value: literalUntyped(*expr).Type, lit: expr.Kind}, nil
 		}
+	case *CastExpr:
+		if expr == nil {
+			break
+		}
+		to, err := sqlType(expr.Type)
+		if err != nil {
+			return expressionType{}, err
+		}
+		operand, err := validateExpr(def, expr.Expr)
+		if err != nil {
+			return expressionType{}, err
+		}
+		if operand.boolean {
+			return expressionType{}, fmt.Errorf("%w: CAST needs a value", ErrExec)
+		}
+		return expressionType{value: to}, nil
 	case *IsNullExpr:
 		if expr == nil {
 			break

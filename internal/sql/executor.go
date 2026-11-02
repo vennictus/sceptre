@@ -362,6 +362,27 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 			return evalResult{}, err
 		}
 		return evalResult{bool: result, isBool: true}, nil
+	case *CastExpr:
+		to, err := sqlType(expr.Type)
+		if err != nil {
+			return evalResult{}, err
+		}
+		operand, err := evalExpr(expr.Expr, row)
+		if err != nil {
+			return evalResult{}, err
+		}
+		if operand.isBool {
+			return evalResult{}, fmt.Errorf("%w: CAST needs a value", ErrExec)
+		}
+		v := operand.value
+		if lit, ok := expr.Expr.(*Literal); ok && lit.Kind == LiteralString {
+			v = table.TextValue(lit.String) // a string literal casts as text
+		}
+		v, err = castValue(v, to)
+		if err != nil {
+			return evalResult{}, err
+		}
+		return evalResult{value: v}, nil
 	case *IsNullExpr:
 		operand, err := evalExpr(expr.Expr, row)
 		if err != nil {
