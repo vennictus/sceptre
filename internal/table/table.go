@@ -64,6 +64,11 @@ type Column struct {
 	Name     string `json:"name"`
 	Type     Type   `json:"type"`
 	Nullable bool   `json:"nullable,omitempty"`
+	// Default fills the column when an insert omits it, and is what rows
+	// written before the column was added read. DefaultNow fills inserts with
+	// the current time instead (timestamp columns).
+	Default    *Value `json:"default,omitempty"`
+	DefaultNow bool   `json:"default_now,omitempty"`
 }
 
 // TableDef is the persisted schema for a table.
@@ -729,6 +734,12 @@ func validateTableDef(def TableDef, requirePrefix bool) error {
 		if column.Nullable && (!def.tagged() || isPrimaryKey(def, column.Name)) {
 			return ErrInvalidTableDef
 		}
+		if column.Default != nil && !valueAllowed(*column.Default, column) {
+			return fmt.Errorf("%w: default for %s does not fit the column", ErrInvalidTableDef, column.Name)
+		}
+		if column.DefaultNow && column.Type != TypeTimestamp {
+			return fmt.Errorf("%w: CURRENT_TIMESTAMP default needs a timestamp column", ErrInvalidTableDef)
+		}
 		if _, exists := columns[column.Name]; exists {
 			return ErrInvalidTableDef
 		}
@@ -901,9 +912,9 @@ func decodeRowValue(def TableDef, key Record, data []byte) (Record, error) {
 		if isPrimaryKey(def, column.Name) {
 			continue
 		}
-		if len(remaining) == 0 && column.Nullable {
-			// Columns added after the row was written read as NULL.
-			values[column.Name] = NullValue()
+		if len(remaining) == 0 && (column.Nullable || column.Default != nil) {
+			// Columns added after the row was written read their default.
+			values[column.Name] = missingValue(column)
 			continue
 		}
 		value, consumed, err := consumeColumnValue(remaining, column.Type, def.tagged())
@@ -1071,6 +1082,14 @@ func (t Type) IsNumeric() bool { return t == TypeInt64 || t == TypeFloat64 }
 
 // HasBytes reports whether values of the type keep their data in Value.Bytes.
 func (t Type) HasBytes() bool { return t == TypeBytes || t == TypeText }
+
+// missingValue is what a row written before column existed reads.
+func missingValue(column Column) Value {
+	if column.Default != nil {
+		return cloneValue(*column.Default)
+	}
+	return NullValue()
+}
 
 // valueAllowed reports whether value may be stored in column.
 func valueAllowed(value Value, column Column) bool {

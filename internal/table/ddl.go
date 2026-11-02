@@ -115,15 +115,16 @@ func (db *DB) RenameColumn(tableName, oldName, newName string) error {
 	return db.store.Apply([]kv.Mutation{put})
 }
 
-// AddColumn appends a nullable column; existing rows read it as NULL. A table
-// in the legacy row format is rewritten in the tagged format first.
+// AddColumn appends a column that accepts NULL or has a default; existing rows
+// read the default, or NULL. A table in the legacy row format is rewritten in
+// the tagged format first.
 func (db *DB) AddColumn(tableName string, column Column) error {
 	def, err := db.mustTable(tableName)
 	if err != nil {
 		return err
 	}
-	if !column.Nullable {
-		return fmt.Errorf("%w: an added column must accept NULL", ErrInvalidTableDef)
+	if !column.Nullable && column.Default == nil {
+		return fmt.Errorf("%w: an added NOT NULL column needs a DEFAULT", ErrInvalidTableDef)
 	}
 	if _, ok := findColumn(def, column.Name); ok {
 		return fmt.Errorf("%w: column %s already exists", ErrInvalidTableDef, column.Name)
@@ -211,7 +212,7 @@ func (db *DB) rewriteRows(from, to TableDef, change func(Record) Record) ([]kv.M
 		row = change(row)
 		for _, c := range to.Columns {
 			if _, ok := row.Values[c.Name]; !ok {
-				row.Values[c.Name] = NullValue()
+				row.Values[c.Name] = missingValue(c)
 			}
 		}
 		key, err := encodeRowKey(to, primaryKeyRecord(to, row))
