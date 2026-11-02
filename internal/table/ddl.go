@@ -115,6 +115,20 @@ func (db *DB) RenameColumn(tableName, oldName, newName string) error {
 	return db.store.Apply([]kv.Mutation{put})
 }
 
+// SetChecks replaces a table's check constraints.
+func (db *DB) SetChecks(tableName string, checks []string) error {
+	def, err := db.mustTable(tableName)
+	if err != nil {
+		return err
+	}
+	def.Checks = append([]string(nil), checks...)
+	put, err := putTableDef(def)
+	if err != nil {
+		return err
+	}
+	return db.store.Apply([]kv.Mutation{put})
+}
+
 // AddColumn appends a column that accepts NULL or has a default; existing rows
 // read the default, or NULL. A table in the legacy row format is rewritten in
 // the tagged format first.

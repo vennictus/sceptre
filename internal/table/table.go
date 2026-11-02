@@ -79,6 +79,9 @@ type TableDef struct {
 	Prefix     uint32     `json:"prefix"`
 	Indexes    []IndexDef `json:"indexes,omitempty"`
 	RowFormat  uint8      `json:"row_format,omitempty"`
+	// Checks are SQL boolean expressions every row must not make false. The
+	// SQL layer enforces them; the table layer only stores them.
+	Checks []string `json:"checks,omitempty"`
 }
 
 func (def TableDef) tagged() bool { return def.RowFormat >= RowFormatTagged }
@@ -1152,6 +1155,7 @@ func cloneTableDef(def TableDef) TableDef {
 		PrimaryKey: append([]string(nil), def.PrimaryKey...),
 		Indexes:    make([]IndexDef, 0, len(def.Indexes)),
 		RowFormat:  def.RowFormat,
+		Checks:     append([]string(nil), def.Checks...),
 	}
 	for _, index := range def.Indexes {
 		out.Indexes = append(out.Indexes, cloneIndexDef(index))
