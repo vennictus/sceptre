@@ -265,6 +265,16 @@ func (p *parser) parseColumnConstraints(column *ColumnDef) error {
 		case p.matchKeyword("null"):
 		case p.matchKeyword("unique"):
 			column.Unique = true
+		case p.matchKeyword("default"):
+			if p.matchKeyword("current_timestamp") {
+				column.DefaultNow = true
+				continue
+			}
+			literal, err := p.expectLiteral()
+			if err != nil {
+				return err
+			}
+			column.Default = &literal
 		default:
 			return nil
 		}

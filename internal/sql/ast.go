@@ -6,10 +6,12 @@ type Statement interface {
 }
 
 type ColumnDef struct {
-	Name    string
-	Type    string
-	NotNull bool
-	Unique  bool
+	Name       string
+	Type       string
+	NotNull    bool
+	Unique     bool
+	Default    *Literal
+	DefaultNow bool // DEFAULT CURRENT_TIMESTAMP
 }
 
 type CreateTableStmt struct {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 	"unicode/utf8"
 
 	"github.com/vennictus/sceptre/internal/table"
@@ -66,13 +67,11 @@ func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
 		PrimaryKey: append([]string(nil), stmt.PrimaryKey...),
 	}
 	for _, column := range stmt.Columns {
-		valueType, err := sqlType(column.Type)
+		c, err := tableColumn(column, slices.Contains(stmt.PrimaryKey, column.Name))
 		if err != nil {
 			return Result{}, err
 		}
-		// Columns accept NULL unless NOT NULL or part of the primary key.
-		nullable := !column.NotNull && !slices.Contains(stmt.PrimaryKey, column.Name)
-		def.Columns = append(def.Columns, table.Column{Name: column.Name, Type: valueType, Nullable: nullable})
+		def.Columns = append(def.Columns, c)
 	}
 	if err := db.CreateTable(def); err != nil {
 		return Result{}, err
@@ -87,6 +86,45 @@ func executeCreateTable(db *table.DB, stmt *CreateTableStmt) (Result, error) {
 		}
 	}
 	return Result{}, nil
+}
+
+// tableColumn converts a column definition. Columns accept NULL unless NOT
+// NULL or part of the primary key.
+func tableColumn(column ColumnDef, primaryKey bool) (table.Column, error) {
+	typ, err := sqlType(column.Type)
+	if err != nil {
+		return table.Column{}, err
+	}
+	c := table.Column{Name: column.Name, Type: typ, Nullable: !column.NotNull && !primaryKey, DefaultNow: column.DefaultNow}
+	if column.Default != nil {
+		v, err := literalToValue(*column.Default, typ)
+		if err != nil {
+			return table.Column{}, err
+		}
+		c.Default = &v
+	}
+	return c, nil
+}
+
+// fillDefaults gives every column an insert omitted its default: the
+// statement's time, a stored default, or NULL.
+func fillDefaults(def table.TableDef, values map[string]table.Value, now time.Time) error {
+	for _, column := range def.Columns {
+		if _, ok := values[column.Name]; ok {
+			continue
+		}
+		switch {
+		case column.DefaultNow:
+			values[column.Name] = table.TimestampValue(now)
+		case column.Default != nil:
+			values[column.Name] = *column.Default
+		case column.Nullable:
+			values[column.Name] = table.NullValue()
+		default:
+			return fmt.Errorf("%w: column %s needs a value", ErrExec, column.Name)
+		}
+	}
+	return nil
 }
 
 func executeCreateIndex(db *table.DB, stmt *CreateIndexStmt) (Result, error) {
@@ -130,14 +168,8 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 		}
 		values[column] = value
 	}
-	for _, column := range def.Columns {
-		if _, ok := values[column.Name]; ok {
-			continue
-		}
-		if !column.Nullable {
-			return Result{}, fmt.Errorf("%w: column %s needs a value", ErrExec, column.Name)
-		}
-		values[column.Name] = table.NullValue()
+	if err := fillDefaults(def, values, time.Now()); err != nil {
+		return Result{}, err
 	}
 	if err := db.Insert(stmt.Table, table.NewRecord(values)); err != nil {
 		return Result{}, err

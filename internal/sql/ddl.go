@@ -3,6 +3,7 @@ package sql
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/vennictus/sceptre/internal/table"
 )
@@ -50,14 +51,19 @@ func executeDropIndex(db *table.DB, stmt *DropIndexStmt) (Result, error) {
 func executeAlterTable(db *table.DB, stmt *AlterTableStmt) (Result, error) {
 	switch {
 	case stmt.Add != nil:
-		typ, err := sqlType(stmt.Add.Type)
+		column, err := tableColumn(*stmt.Add, false)
 		if err != nil {
 			return Result{}, err
 		}
-		if stmt.Add.NotNull {
-			return Result{}, fmt.Errorf("%w: an added column must accept NULL until DEFAULT is supported", ErrExec)
+		if column.DefaultNow {
+			// Existing rows read the time of the ALTER, as in PostgreSQL.
+			now := table.TimestampValue(time.Now())
+			column.Default = &now
 		}
-		if err := db.AddColumn(stmt.Table, table.Column{Name: stmt.Add.Name, Type: typ, Nullable: true}); err != nil {
+		if !column.Nullable && column.Default == nil {
+			return Result{}, fmt.Errorf("%w: an added NOT NULL column needs a DEFAULT", ErrExec)
+		}
+		if err := db.AddColumn(stmt.Table, column); err != nil {
 			return Result{}, err
 		}
 		if stmt.Add.Unique {
