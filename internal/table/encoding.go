@@ -3,17 +3,39 @@ package table
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 )
 
 var ErrCorruptRecord = errors.New("table: corrupt record encoding")
 
 func appendEncodedValue(dst []byte, value Value) []byte {
 	switch value.Type {
-	case TypeInt64:
+	case TypeInt64, TypeTimestamp:
 		var buf [8]byte
 		encoded := uint64(value.I64) ^ (1 << 63)
 		binary.BigEndian.PutUint64(buf[:], encoded)
 		return append(dst, buf[:]...)
+	case TypeFloat64:
+		// Flip the sign bit of positives and every bit of negatives, so the
+		// bytes sort in numeric order.
+		f := value.F64
+		if f == 0 {
+			f = 0 // -0 encodes as 0
+		}
+		bits := math.Float64bits(f)
+		if bits&(1<<63) != 0 {
+			bits = ^bits
+		} else {
+			bits |= 1 << 63
+		}
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], bits)
+		return append(dst, buf[:]...)
+	case TypeBool:
+		if value.Bool {
+			return append(dst, 1)
+		}
+		return append(dst, 0)
 	case TypeBytes, TypeText:
 		for _, b := range value.Bytes {
 			switch b {
@@ -33,12 +55,28 @@ func appendEncodedValue(dst []byte, value Value) []byte {
 
 func consumeEncodedValue(src []byte, valueType Type) (Value, int, error) {
 	switch valueType {
-	case TypeInt64:
+	case TypeInt64, TypeTimestamp:
 		if len(src) < 8 {
 			return Value{}, 0, ErrCorruptRecord
 		}
 		encoded := binary.BigEndian.Uint64(src[:8]) ^ (1 << 63)
-		return Int64Value(int64(encoded)), 8, nil
+		return Value{Type: valueType, I64: int64(encoded)}, 8, nil
+	case TypeFloat64:
+		if len(src) < 8 {
+			return Value{}, 0, ErrCorruptRecord
+		}
+		bits := binary.BigEndian.Uint64(src[:8])
+		if bits&(1<<63) != 0 {
+			bits &^= 1 << 63
+		} else {
+			bits = ^bits
+		}
+		return Value{Type: TypeFloat64, F64: math.Float64frombits(bits)}, 8, nil
+	case TypeBool:
+		if len(src) < 1 || src[0] > 1 {
+			return Value{}, 0, ErrCorruptRecord
+		}
+		return BoolValue(src[0] == 1), 1, nil
 	case TypeBytes, TypeText:
 		out := make([]byte, 0)
 		for i := 0; i < len(src); {

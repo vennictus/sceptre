@@ -369,6 +369,8 @@ func valueString(value Value) string {
 		return fmt.Sprintf("%q", string(value.Bytes))
 	case TypeNull:
 		return "NULL"
+	case TypeFloat64, TypeBool, TypeTimestamp:
+		return FormatValue(value)
 	default:
 		return "<invalid>"
 	}

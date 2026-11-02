@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 	"unicode/utf8"
 
 	"github.com/vennictus/sceptre/internal/kv"
@@ -18,7 +20,10 @@ const (
 	TypeInt64 Type = 2
 	TypeText  Type = 3 // UTF-8; stored and ordered like bytes
 	// TypeNull is the type of a NULL value. It is not a column type.
-	TypeNull Type = 4
+	TypeNull      Type = 4
+	TypeFloat64   Type = 5 // finite IEEE 754 doubles; -0 is stored as 0
+	TypeBool      Type = 6
+	TypeTimestamp Type = 7 // microseconds since the Unix epoch, UTC
 
 	// RowFormatTagged stores each non-key column value with a NULL/present tag,
 	// in rows and in secondary index keys, and reads missing trailing columns
@@ -86,7 +91,9 @@ type IndexDef struct {
 type Value struct {
 	Type  Type
 	Bytes []byte
-	I64   int64
+	I64   int64 // int64 values, and timestamps in microseconds
+	F64   float64
+	Bool  bool
 }
 
 // Record is a row or primary-key tuple keyed by column name.
@@ -135,6 +142,25 @@ func BytesValue(value []byte) Value {
 }
 
 // Int64Value constructs a signed integer table value.
+// Float64Value returns a float64 value. NaN and infinities cannot be stored.
+func Float64Value(v float64) Value {
+	if v == 0 {
+		v = 0 // store -0 as 0 so equal values encode equally
+	}
+	return Value{Type: TypeFloat64, F64: v}
+}
+
+// BoolValue returns a bool value.
+func BoolValue(v bool) Value { return Value{Type: TypeBool, Bool: v} }
+
+// TimestampValue returns a timestamp, truncated to microseconds, in UTC.
+func TimestampValue(t time.Time) Value {
+	return Value{Type: TypeTimestamp, I64: t.UnixMicro()}
+}
+
+// Time returns a timestamp value as a UTC time.
+func (v Value) Time() time.Time { return time.UnixMicro(v.I64).UTC() }
+
 // NullValue returns the SQL NULL.
 func NullValue() Value { return Value{Type: TypeNull} }
 
@@ -999,14 +1025,24 @@ func catalogTableKey(name string) []byte {
 }
 
 func validType(valueType Type) bool {
-	return valueType == TypeBytes || valueType == TypeInt64 || valueType == TypeText
+	switch valueType {
+	case TypeBytes, TypeInt64, TypeText, TypeFloat64, TypeBool, TypeTimestamp:
+		return true
+	}
+	return false
 }
 
 func valueMatchesType(value Value, valueType Type) bool {
 	if value.Type != valueType || !validType(value.Type) {
 		return false
 	}
-	return value.Type != TypeText || utf8.Valid(value.Bytes)
+	switch value.Type {
+	case TypeText:
+		return utf8.Valid(value.Bytes)
+	case TypeFloat64:
+		return !math.IsNaN(value.F64) && !math.IsInf(value.F64, 0)
+	}
+	return true
 }
 
 // String returns the SQL name of the type.
@@ -1018,9 +1054,20 @@ func (t Type) String() string {
 		return "int64"
 	case TypeText:
 		return "text"
+	case TypeNull:
+		return "null"
+	case TypeFloat64:
+		return "float64"
+	case TypeBool:
+		return "bool"
+	case TypeTimestamp:
+		return "timestamp"
 	}
 	return fmt.Sprintf("type(%d)", uint32(t))
 }
+
+// IsNumeric reports whether the type is int64 or float64.
+func (t Type) IsNumeric() bool { return t == TypeInt64 || t == TypeFloat64 }
 
 // HasBytes reports whether values of the type keep their data in Value.Bytes.
 func (t Type) HasBytes() bool { return t == TypeBytes || t == TypeText }
