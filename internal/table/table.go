@@ -69,6 +69,9 @@ type Column struct {
 	// the current time instead (timestamp columns).
 	Default    *Value `json:"default,omitempty"`
 	DefaultNow bool   `json:"default_now,omitempty"`
+	// AutoIncrement numbers inserts that omit the column; it must be the
+	// table's only primary-key column, of type int64.
+	AutoIncrement bool `json:"auto_increment,omitempty"`
 }
 
 // TableDef is the persisted schema for a table.
@@ -426,6 +429,11 @@ func (db *DB) InsertMany(tableName string, records []Record) error {
 	if err := db.checkUnique(def, records); err != nil {
 		return err
 	}
+	if seq, ok, err := db.advanceSequence(def, records); err != nil {
+		return err
+	} else if ok {
+		mutations = append(mutations, seq)
+	}
 	return db.store.Apply(mutations)
 }
 
@@ -598,6 +606,11 @@ func (db *DB) writeRow(tableName string, record Record, mode writeMode) error {
 	if err := db.checkUnique(def, []Record{record}); err != nil {
 		return err
 	}
+	if seq, ok, err := db.advanceSequence(def, []Record{record}); err != nil {
+		return err
+	} else if ok {
+		mutations = append(mutations, seq)
+	}
 	return db.store.Apply(mutations)
 }
 
@@ -742,6 +755,9 @@ func validateTableDef(def TableDef, requirePrefix bool) error {
 		}
 		if column.DefaultNow && column.Type != TypeTimestamp {
 			return fmt.Errorf("%w: CURRENT_TIMESTAMP default needs a timestamp column", ErrInvalidTableDef)
+		}
+		if column.AutoIncrement && (column.Type != TypeInt64 || len(def.PrimaryKey) != 1 || def.PrimaryKey[0] != column.Name) {
+			return fmt.Errorf("%w: AUTOINCREMENT needs the table's only primary-key column, of type int64", ErrInvalidTableDef)
 		}
 		if _, exists := columns[column.Name]; exists {
 			return ErrInvalidTableDef

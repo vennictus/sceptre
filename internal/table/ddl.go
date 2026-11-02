@@ -29,7 +29,7 @@ func (db *DB) DropTable(name string) error {
 		}
 		mutations = append(mutations, dels...)
 	}
-	mutations = append(mutations, kv.Delete(catalogTableKey(name)))
+	mutations = append(mutations, kv.Delete(catalogTableKey(name)), kv.Delete(sequenceKey(def)))
 	return db.store.Apply(mutations)
 }
 
