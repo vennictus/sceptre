@@ -13,6 +13,8 @@ type ColumnDef struct {
 	Default    *Literal
 	DefaultNow bool // DEFAULT CURRENT_TIMESTAMP
 	Checks     []Expr
+	PrimaryKey bool // PRIMARY KEY written on the column
+	AutoInc    bool // AUTOINCREMENT
 }
 
 type CreateTableStmt struct {

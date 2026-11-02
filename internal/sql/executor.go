@@ -102,7 +102,7 @@ func tableColumn(column ColumnDef, primaryKey bool) (table.Column, error) {
 	if err != nil {
 		return table.Column{}, err
 	}
-	c := table.Column{Name: column.Name, Type: typ, Nullable: !column.NotNull && !primaryKey, DefaultNow: column.DefaultNow}
+	c := table.Column{Name: column.Name, Type: typ, Nullable: !column.NotNull && !primaryKey, DefaultNow: column.DefaultNow, AutoIncrement: column.AutoInc}
 	if column.Default != nil {
 		v, err := literalToValue(*column.Default, typ)
 		if err != nil {
@@ -111,6 +111,36 @@ func tableColumn(column ColumnDef, primaryKey bool) (table.Column, error) {
 		c.Default = &v
 	}
 	return c, nil
+}
+
+// fillAutoIncrement numbers rows that omit the table's AUTOINCREMENT column.
+func fillAutoIncrement(db *table.DB, def table.TableDef, rows []map[string]table.Value) error {
+	var column string
+	for _, c := range def.Columns {
+		if c.AutoIncrement {
+			column = c.Name
+		}
+	}
+	if column == "" {
+		return nil
+	}
+	var missing []map[string]table.Value
+	for _, row := range rows {
+		if _, ok := row[column]; !ok {
+			missing = append(missing, row)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	ids, err := db.NextIDs(def.Name, len(missing))
+	if err != nil {
+		return err
+	}
+	for i, row := range missing {
+		row[column] = table.Int64Value(ids[i])
+	}
+	return nil
 }
 
 // fillDefaults gives every column an insert omitted its default: the
@@ -174,6 +204,9 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 			return Result{}, err
 		}
 		values[column] = value
+	}
+	if err := fillAutoIncrement(db, def, []map[string]table.Value{values}); err != nil {
+		return Result{}, err
 	}
 	if err := fillDefaults(def, values, time.Now()); err != nil {
 		return Result{}, err

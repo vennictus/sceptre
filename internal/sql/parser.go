@@ -257,6 +257,15 @@ func (p *parser) parseCreateTable() (Statement, error) {
 	if err := p.expect(tokenRParen); err != nil {
 		return nil, err
 	}
+	for _, c := range columns {
+		if !c.PrimaryKey {
+			continue
+		}
+		if primaryKey != nil {
+			return nil, p.errorf("primary key declared twice")
+		}
+		primaryKey = []string{c.Name}
+	}
 	return &CreateTableStmt{Name: name, Columns: columns, PrimaryKey: primaryKey, IfNotExists: ifNotExists, Checks: checks}, nil
 }
 
@@ -301,6 +310,13 @@ func (p *parser) parseColumnConstraints(column *ColumnDef) error {
 		case p.matchKeyword("null"):
 		case p.matchKeyword("unique"):
 			column.Unique = true
+		case p.matchKeyword("primary"):
+			if err := p.expectKeyword("key"); err != nil {
+				return err
+			}
+			column.PrimaryKey = true
+		case p.matchKeyword("autoincrement"):
+			column.AutoInc = true
 		case p.matchKeyword("check"):
 			expr, err := p.parseParenExpr()
 			if err != nil {
