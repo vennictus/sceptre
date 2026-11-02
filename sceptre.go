@@ -377,7 +377,22 @@ func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, 
 	if sql.IsTransactionControl(stmt) {
 		return Result{}, executionError(t.control(stmt))
 	}
+	// A statement may write in several steps (an upsert row by row, a table
+	// and its unique indexes). Run it under a savepoint so a failure leaves
+	// none of its writes behind.
+	mark, err := t.inner.Savepoint()
+	if err != nil {
+		return Result{}, executionError(err)
+	}
 	r, err := sql.ExecuteStatement(t.tables, stmt)
+	if err != nil {
+		if rbErr := t.inner.RollbackTo(mark); rbErr != nil {
+			err = errors.Join(err, rbErr)
+		}
+	}
+	if relErr := t.inner.Release(); relErr != nil && err == nil {
+		err = relErr
+	}
 	return r, executionError(err)
 }
 
