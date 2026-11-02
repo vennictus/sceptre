@@ -30,6 +30,7 @@ const (
 	tokenFloat     // a number with a fraction or exponent
 	tokenBool      // a bool binding; TRUE and FALSE lex as identifiers
 	tokenTimestamp // a timestamp binding: microseconds since the epoch
+	tokenDot
 )
 
 type token struct {
@@ -52,6 +53,9 @@ func lex(input string) ([]token, error) {
 			i++
 		case ',':
 			tokens = append(tokens, token{kind: tokenComma, text: ","})
+			i++
+		case '.':
+			tokens = append(tokens, token{kind: tokenDot, text: "."})
 			i++
 		case '(':
 			tokens = append(tokens, token{kind: tokenLParen, text: "("})

@@ -190,6 +190,11 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if stmt.Returning != nil {
+		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
+	}
 	rows, err := insertRows(db, def, columns, stmt)
 	if err != nil {
 		return Result{}, err
@@ -211,8 +216,15 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 			return Result{}, err
 		}
 	}
-	if err := db.InsertMany(stmt.Table, records); err != nil {
+	if stmt.OnConflict != nil {
+		if records, err = insertWithConflicts(db, def, stmt.OnConflict, records); err != nil {
+			return Result{}, err
+		}
+	} else if err := db.InsertMany(stmt.Table, records); err != nil {
 		return Result{}, err
+	}
+	if stmt.Returning != nil {
+		return returningResult(def, stmt.Returning, records)
 	}
 	return Result{RowsAffected: len(records)}, nil
 }
@@ -375,8 +387,16 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 		}
 		updates = append(updates, updated)
 	}
+	if stmt.Returning != nil {
+		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := db.UpdateMany(stmt.Table, updates); err != nil {
 		return Result{}, err
+	}
+	if stmt.Returning != nil {
+		return returningResult(def, stmt.Returning, updates)
 	}
 	return Result{RowsAffected: len(matchesRows)}, nil
 }
@@ -406,9 +426,17 @@ func executeDelete(db *table.DB, stmt *DeleteStmt) (Result, error) {
 	for _, row := range matchesRows {
 		keys = append(keys, primaryKeyRecord(def, row))
 	}
+	if stmt.Returning != nil {
+		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
+	}
 	removed, err := db.DeleteMany(stmt.Table, keys)
 	if err != nil {
 		return Result{}, err
+	}
+	if stmt.Returning != nil {
+		return returningResult(def, stmt.Returning, matchesRows)
 	}
 	return Result{RowsAffected: removed}, nil
 }

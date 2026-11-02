@@ -40,10 +40,26 @@ func (*CreateIndexStmt) statementNode() {}
 // InsertStmt is INSERT INTO table [(columns)] followed by VALUES rows or a
 // SELECT. Without a column list, values fill every column in order.
 type InsertStmt struct {
-	Table   string
+	Table      string
+	Columns    []string
+	Rows       [][]Literal
+	Select     *SelectStmt
+	OnConflict *OnConflict
+	Returning  *Returning
+}
+
+// OnConflict is ON CONFLICT [(columns)] DO NOTHING, or ON CONFLICT (columns)
+// DO UPDATE SET ... . The columns name the primary key or a unique index.
+type OnConflict struct {
+	Columns   []string
+	DoNothing bool
+	Set       []Assignment
+}
+
+// Returning is RETURNING * or RETURNING columns.
+type Returning struct {
+	All     bool
 	Columns []string
-	Rows    [][]Literal
-	Select  *SelectStmt
 }
 
 func (*InsertStmt) statementNode() {}
@@ -62,19 +78,24 @@ func (*SelectStmt) statementNode() {}
 type Assignment struct {
 	Column string
 	Value  Literal
+	// Excluded, in ON CONFLICT DO UPDATE, takes the value the conflicting
+	// insert proposed for that column (excluded.column).
+	Excluded string
 }
 
 type UpdateStmt struct {
 	Table       string
 	Assignments []Assignment
 	Where       Expr
+	Returning   *Returning
 }
 
 func (*UpdateStmt) statementNode() {}
 
 type DeleteStmt struct {
-	Table string
-	Where Expr
+	Table     string
+	Where     Expr
+	Returning *Returning
 }
 
 func (*DeleteStmt) statementNode() {}

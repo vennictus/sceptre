@@ -382,7 +382,7 @@ func (p *parser) parseInsert() (Statement, error) {
 			return nil, err
 		}
 		stmt.Select = sel.(*SelectStmt)
-		return stmt, nil
+		return p.finishInsert(stmt)
 	}
 	if err := p.expectKeyword("values"); err != nil {
 		return nil, err
@@ -400,9 +400,21 @@ func (p *parser) parseInsert() (Statement, error) {
 		}
 		stmt.Rows = append(stmt.Rows, row)
 		if !p.match(tokenComma) {
-			return stmt, nil
+			return p.finishInsert(stmt)
 		}
 	}
+}
+
+// finishInsert reads INSERT's optional ON CONFLICT and RETURNING clauses.
+func (p *parser) finishInsert(stmt *InsertStmt) (Statement, error) {
+	var err error
+	if stmt.OnConflict, err = p.parseOnConflict(); err != nil {
+		return nil, err
+	}
+	if stmt.Returning, err = p.parseReturning(); err != nil {
+		return nil, err
+	}
+	return stmt, nil
 }
 
 func (p *parser) parseSelect() (Statement, error) {
@@ -462,23 +474,9 @@ func (p *parser) parseUpdate() (Statement, error) {
 	if err := p.expectKeyword("set"); err != nil {
 		return nil, err
 	}
-	var assignments []Assignment
-	for {
-		column, err := p.expectIdent()
-		if err != nil {
-			return nil, err
-		}
-		if err := p.expect(tokenEqual); err != nil {
-			return nil, err
-		}
-		value, err := p.expectLiteral()
-		if err != nil {
-			return nil, err
-		}
-		assignments = append(assignments, Assignment{Column: column, Value: value})
-		if !p.match(tokenComma) {
-			break
-		}
+	assignments, err := p.parseAssignments(false)
+	if err != nil {
+		return nil, err
 	}
 	stmt := &UpdateStmt{Table: table, Assignments: assignments}
 	if p.matchKeyword("where") {
@@ -488,7 +486,93 @@ func (p *parser) parseUpdate() (Statement, error) {
 		}
 		stmt.Where = where
 	}
+	if stmt.Returning, err = p.parseReturning(); err != nil {
+		return nil, err
+	}
 	return stmt, nil
+}
+
+// parseAssignments reads col = literal, ...; with excluded set, a value may
+// also be excluded.col.
+func (p *parser) parseAssignments(excluded bool) ([]Assignment, error) {
+	var out []Assignment
+	for {
+		column, err := p.expectIdent()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expect(tokenEqual); err != nil {
+			return nil, err
+		}
+		a := Assignment{Column: column}
+		if excluded && p.at(tokenIdent) && strings.EqualFold(p.peek().text, "excluded") && p.tokens[p.pos+1].kind == tokenDot {
+			p.pos += 2
+			if a.Excluded, err = p.expectIdent(); err != nil {
+				return nil, err
+			}
+		} else if a.Value, err = p.expectLiteral(); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+		if !p.match(tokenComma) {
+			return out, nil
+		}
+	}
+}
+
+// parseReturning reads an optional RETURNING * or RETURNING columns.
+func (p *parser) parseReturning() (*Returning, error) {
+	if !p.matchKeyword("returning") {
+		return nil, nil
+	}
+	if p.match(tokenStar) {
+		return &Returning{All: true}, nil
+	}
+	columns, err := p.parseIdentList()
+	if err != nil {
+		return nil, err
+	}
+	return &Returning{Columns: columns}, nil
+}
+
+// parseOnConflict reads an optional ON CONFLICT clause.
+func (p *parser) parseOnConflict() (*OnConflict, error) {
+	if !p.matchKeyword("on") {
+		return nil, nil
+	}
+	if err := p.expectKeyword("conflict"); err != nil {
+		return nil, err
+	}
+	out := &OnConflict{}
+	if p.at(tokenLParen) {
+		columns, err := p.parseIdentListInParens()
+		if err != nil {
+			return nil, err
+		}
+		out.Columns = columns
+	}
+	if err := p.expectKeyword("do"); err != nil {
+		return nil, err
+	}
+	if p.matchKeyword("nothing") {
+		out.DoNothing = true
+		return out, nil
+	}
+	if err := p.expectKeyword("update"); err != nil {
+		return nil, err
+	}
+	if out.Columns == nil {
+		return nil, p.errorf("ON CONFLICT DO UPDATE needs conflict columns")
+	}
+	if err := p.expectKeyword("set"); err != nil {
+		return nil, err
+	}
+	set, err := p.parseAssignments(true)
+	if err != nil {
+		return nil, err
+	}
+	out.Set = set
+	return out, nil
 }
 
 func (p *parser) parseDelete() (Statement, error) {
@@ -506,6 +590,9 @@ func (p *parser) parseDelete() (Statement, error) {
 			return nil, err
 		}
 		stmt.Where = where
+	}
+	if stmt.Returning, err = p.parseReturning(); err != nil {
+		return nil, err
 	}
 	return stmt, nil
 }
