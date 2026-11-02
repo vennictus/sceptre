@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/vennictus/sceptre/internal/kv"
 	"github.com/vennictus/sceptre/internal/sql"
@@ -19,12 +20,25 @@ type Value = table.Value
 type Type = table.Type
 
 const (
-	TypeInt64 = table.TypeInt64
-	TypeBytes = table.TypeBytes
-	TypeText  = table.TypeText
+	TypeInt64     = table.TypeInt64
+	TypeBytes     = table.TypeBytes
+	TypeText      = table.TypeText
+	TypeFloat64   = table.TypeFloat64
+	TypeBool      = table.TypeBool
+	TypeTimestamp = table.TypeTimestamp
 	// TypeNull is the type of Null(); columns are never of this type.
 	TypeNull = table.TypeNull
 )
+
+// Float64 returns a float64 value; NaN and infinities are rejected.
+func Float64(v float64) Value { return table.Float64Value(v) }
+
+// Bool returns a bool value.
+func Bool(v bool) Value { return table.BoolValue(v) }
+
+// Timestamp returns a timestamp value: UTC, truncated to microseconds. Read
+// one back with Value.Time.
+func Timestamp(t time.Time) Value { return table.TimestampValue(t) }
 
 func Int64(v int64) Value  { return table.Int64Value(v) }
 func Bytes(v []byte) Value { return table.BytesValue(v) }

@@ -1165,7 +1165,7 @@ func printSchema(stdout io.Writer, def table.TableDef) {
 
 func formatType(valueType table.Type) string {
 	switch valueType {
-	case table.TypeInt64, table.TypeBytes, table.TypeText:
+	case table.TypeInt64, table.TypeBytes, table.TypeText, table.TypeFloat64, table.TypeBool, table.TypeTimestamp:
 		return valueType.String()
 	default:
 		return "unknown"
@@ -1206,18 +1206,7 @@ func printCrashReport(stdout io.Writer, report debug.CrashReport) {
 	}
 }
 
-func formatValue(value table.Value) string {
-	switch value.Type {
-	case table.TypeInt64:
-		return fmt.Sprintf("%d", value.I64)
-	case table.TypeBytes, table.TypeText:
-		return string(value.Bytes)
-	case table.TypeNull:
-		return "NULL"
-	default:
-		return "<invalid>"
-	}
-}
+func formatValue(value table.Value) string { return table.FormatValue(value) }
 
 func formatRecord(columns []table.Column, record table.Record) string {
 	names := make([]string, 0, len(columns))
