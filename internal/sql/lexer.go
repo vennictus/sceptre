@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
 	"strconv"
@@ -36,6 +37,9 @@ const (
 type token struct {
 	kind tokenKind
 	text string
+	// quoted marks a "double-quoted" identifier: always a name, never a
+	// keyword, so a column may be called "true" or "select".
+	quoted bool
 }
 
 func lex(input string) ([]token, error) {
@@ -101,8 +105,22 @@ func lex(input string) ([]token, error) {
 			}
 			tokens = append(tokens, token{kind: tokenString, text: value})
 			i = next
+		case '"':
+			name, next, err := lexQuotedIdent(input, i+1)
+			if err != nil {
+				return nil, err
+			}
+			tokens = append(tokens, token{kind: tokenIdent, text: name, quoted: true})
+			i = next
 		default:
 			switch {
+			case (input[i] == 'x' || input[i] == 'X') && i+1 < len(input) && input[i+1] == '\'':
+				value, next, err := lexHexString(input, i+2)
+				if err != nil {
+					return nil, err
+				}
+				tokens = append(tokens, token{kind: tokenString, text: value})
+				i = next
 			case isIdentStart(input[i]):
 				start := i
 				i++
@@ -176,6 +194,41 @@ func lexString(input string, start int) (string, int, error) {
 		return out.String(), i + 1, nil
 	}
 	return "", 0, fmt.Errorf("%w: unterminated string", ErrParse)
+}
+
+// lexQuotedIdent reads a "double-quoted" identifier; "" stands for one ".
+func lexQuotedIdent(input string, start int) (string, int, error) {
+	var out strings.Builder
+	for i := start; i < len(input); i++ {
+		if input[i] != '"' {
+			out.WriteByte(input[i])
+			continue
+		}
+		if i+1 < len(input) && input[i+1] == '"' {
+			out.WriteByte('"')
+			i++
+			continue
+		}
+		if out.Len() == 0 {
+			return "", 0, fmt.Errorf("%w: empty quoted identifier", ErrParse)
+		}
+		return out.String(), i + 1, nil
+	}
+	return "", 0, fmt.Errorf("%w: unterminated quoted identifier", ErrParse)
+}
+
+// lexHexString reads the body of X'...': pairs of hex digits, one per byte.
+// It is how stored expressions write bytes that are not valid UTF-8.
+func lexHexString(input string, start int) (string, int, error) {
+	end := strings.IndexByte(input[start:], '\'')
+	if end < 0 {
+		return "", 0, fmt.Errorf("%w: unterminated hex string", ErrParse)
+	}
+	raw, err := hex.DecodeString(input[start : start+end])
+	if err != nil {
+		return "", 0, fmt.Errorf("%w: invalid hex string", ErrParse)
+	}
+	return string(raw), start + end + 1, nil
 }
 
 func isIdentStart(b byte) bool {

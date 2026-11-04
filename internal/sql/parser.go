@@ -505,7 +505,7 @@ func (p *parser) parseAssignments(excluded bool) ([]Assignment, error) {
 			return nil, err
 		}
 		a := Assignment{Column: column}
-		if excluded && p.at(tokenIdent) && strings.EqualFold(p.peek().text, "excluded") && p.tokens[p.pos+1].kind == tokenDot {
+		if excluded && p.at(tokenIdent) && !p.peek().quoted && strings.EqualFold(p.peek().text, "excluded") && p.tokens[p.pos+1].kind == tokenDot {
 			p.pos += 2
 			if a.Excluded, err = p.expectIdent(); err != nil {
 				return nil, err
@@ -665,7 +665,7 @@ func (p *parser) parsePrimary() (Expr, error) {
 		}
 		return expr, nil
 	}
-	if p.at(tokenIdent) && strings.EqualFold(p.peek().text, "cast") && p.tokens[p.pos+1].kind == tokenLParen {
+	if p.at(tokenIdent) && !p.peek().quoted && strings.EqualFold(p.peek().text, "cast") && p.tokens[p.pos+1].kind == tokenLParen {
 		p.pos += 2
 		operand, err := p.parseExpr()
 		if err != nil {
@@ -683,7 +683,7 @@ func (p *parser) parsePrimary() (Expr, error) {
 		}
 		return &CastExpr{Expr: operand, Type: strings.ToLower(typeName)}, nil
 	}
-	if p.at(tokenIdent) && !p.atNull() && !p.atBool() {
+	if p.at(tokenIdent) && !p.atNull() && !p.atBool() && !p.atTimestampLiteral() {
 		name := p.next().text
 		return &IdentExpr{Name: name}, nil
 	}
@@ -769,6 +769,14 @@ func (p *parser) expectLiteral() (Literal, error) {
 		}
 		return Literal{Kind: LiteralTimestamp, Int: micros}, nil
 	default:
+		if p.atTimestampLiteral() {
+			p.next()
+			t, err := parseTimestamp(p.next().text)
+			if err != nil {
+				return Literal{}, fmt.Errorf("%w: %v", ErrParse, err)
+			}
+			return Literal{Kind: LiteralTimestamp, Int: t.UnixMicro()}, nil
+		}
 		if p.atNull() {
 			p.next()
 			return Literal{Kind: LiteralNull}, nil
@@ -783,13 +791,20 @@ func (p *parser) expectLiteral() (Literal, error) {
 // atBool reports whether the next token is TRUE or FALSE: a keyword or a binding.
 func (p *parser) atBool() bool {
 	tok := p.peek()
-	return tok.kind == tokenBool || tok.kind == tokenIdent && (strings.EqualFold(tok.text, "true") || strings.EqualFold(tok.text, "false"))
+	return tok.kind == tokenBool || tok.kind == tokenIdent && !tok.quoted && (strings.EqualFold(tok.text, "true") || strings.EqualFold(tok.text, "false"))
 }
 
 // atNull reports whether the next token is NULL: the keyword or a binding.
 func (p *parser) atNull() bool {
 	tok := p.peek()
-	return tok.kind == tokenNull || tok.kind == tokenIdent && strings.EqualFold(tok.text, "null")
+	return tok.kind == tokenNull || tok.kind == tokenIdent && !tok.quoted && strings.EqualFold(tok.text, "null")
+}
+
+// atTimestampLiteral reports whether the next tokens are TIMESTAMP '...'.
+func (p *parser) atTimestampLiteral() bool {
+	tok := p.peek()
+	return tok.kind == tokenIdent && !tok.quoted && strings.EqualFold(tok.text, "timestamp") &&
+		p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].kind == tokenString
 }
 
 func (p *parser) expectIdent() (string, error) {
@@ -825,7 +840,7 @@ func (p *parser) expect(kind tokenKind) error {
 }
 
 func (p *parser) matchKeyword(keyword string) bool {
-	if !p.at(tokenIdent) || !strings.EqualFold(p.peek().text, keyword) {
+	if !p.at(tokenIdent) || p.peek().quoted || !strings.EqualFold(p.peek().text, keyword) {
 		return false
 	}
 	p.pos++
