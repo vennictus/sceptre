@@ -27,8 +27,8 @@ inspectability, consistency checking, query tracing, and a polished CLI demo.
 - Network server mode (`sceptre serve` is loopback-only; see docs/SERVICE.md).
 - Multi-process write sharing.
 - Full SQL compatibility.
-- Joins, aggregation, sorting, SQL transaction statements, or selectable
-  isolation levels (the engine has snapshot reads; SQL does not expose them).
+- Joins, aggregation, sorting, or selectable isolation levels (the engine has
+  snapshot reads; SQL does not expose them).
 - Live backup and restore.
 - Broad SQL compatibility and comparative performance superiority claims.
 
@@ -176,14 +176,15 @@ pages. Oversized keys fail the whole statement with the `limit` error category.
 
 ## Query Model
 
-Supported SQL:
+Supported SQL (the full list is the [SQL support matrix](docs/SQL.md)):
 
-- `CREATE TABLE`
-- `CREATE INDEX`
-- `INSERT`
+- `CREATE TABLE`, `CREATE [UNIQUE] INDEX`, `DROP TABLE`, `DROP INDEX`,
+  `ALTER TABLE` (add, drop, rename)
+- `INSERT` (many rows, `INSERT ... SELECT`, `ON CONFLICT`, `RETURNING`)
 - `SELECT`
-- `UPDATE`
-- `DELETE`
+- `UPDATE`, `DELETE` (with `RETURNING`)
+- `BEGIN`, `COMMIT`, `ROLLBACK` through a Session; `SAVEPOINT`, `RELEASE`,
+  `ROLLBACK TO` in a transaction
 
 Planner access paths:
 
@@ -212,8 +213,10 @@ SQL UPDATE and DELETE stage all matching row/index changes and apply them throug
 one KV batch. Table UpdateMany rejects repeated primary keys and stages all rows
 before applying its batch; missing rows or invalid records do not publish a
 commit. Zero-match mutations do not advance the metadata generation. These are
-statement boundaries; SQL text does not support BEGIN/COMMIT/ROLLBACK. The public
-Go API groups statements into transactions and coordinates concurrent callers.
+statement boundaries. Every writing statement is atomic, also over a raw store
+(the CLI and shell), where its writes commit once. The public Go API groups
+statements into transactions (in Go, or as SQL through a Session) and
+coordinates concurrent callers.
 Raw table/SQL access requires caller serialization.
 
 An error is not proof of rollback. The commit outcomes above also apply to SQL
@@ -239,9 +242,11 @@ time. Reads run concurrently: SELECT through `DB.Execute`, `DB.Tables`, and
 snapshot), never wait for the write transaction and never see its pending
 changes. Failed statements preserve prior pending work; Commit ends the
 transaction on every outcome. Close aborts open work and waits for in-flight
-reads. SQL transaction statements remain unsupported.
+reads. A Session runs BEGIN, COMMIT, ROLLBACK and savepoints as SQL;
+`DB.Execute` rejects them.
 
-Typed positional `?` parameters bind int64 or arbitrary bytes as literal tokens.
+Typed positional `?` parameters bind int64, float64, bool, text, bytes,
+timestamp or NULL as literal tokens.
 The API caps SELECT results to MaxRows (default 1000), SQL text to 65536 bytes,
 and binding count to 256. These are request/output bounds, not engine memory or
 execution-work limits. Contexts stop ownership waits and are checked before work;
