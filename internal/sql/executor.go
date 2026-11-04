@@ -294,7 +294,11 @@ func insertRows(db *table.DB, def table.TableDef, columns []table.Column, stmt *
 				v := src[j]
 				if !v.IsNull() && v.Type != c.Type {
 					if v.Type == table.TypeInt64 && c.Type == table.TypeFloat64 {
-						v = table.Float64Value(float64(v.I64))
+						f, err := exactFloat(v.I64)
+						if err != nil {
+							return nil, err
+						}
+						v = table.Float64Value(f)
 					} else {
 						return nil, fmt.Errorf("%w: SELECT column %d is %s, %s is %s", ErrExec, j+1, v.Type, c.Name, c.Type)
 					}
@@ -618,6 +622,17 @@ func compareValues(left, right table.Value, op string) (bool, error) {
 	}
 }
 
+// exactFloat converts an int64 to the float64 with the same value, or fails:
+// above 2^53 not every integer has one, and silently rounding would change
+// the number (9007199254740993 would become ...992).
+func exactFloat(n int64) (float64, error) {
+	f := float64(n)
+	if f == 0x1p63 || int64(f) != n {
+		return 0, fmt.Errorf("%w: int64 %d has no exact float64", table.ErrInvalidValue, n)
+	}
+	return f, nil
+}
+
 func literalUntyped(literal Literal) table.Value {
 	switch literal.Kind {
 	case LiteralInt:
@@ -667,7 +682,11 @@ func literalToValue(literal Literal, valueType table.Type) (table.Value, error) 
 		case LiteralFloat:
 			return table.Float64Value(literal.Float), nil
 		case LiteralInt:
-			return table.Float64Value(float64(literal.Int)), nil
+			f, err := exactFloat(literal.Int)
+			if err != nil {
+				return table.Value{}, err
+			}
+			return table.Float64Value(f), nil
 		}
 		return table.Value{}, fmt.Errorf("%w: expected float64 literal", ErrExec)
 	case table.TypeBool:

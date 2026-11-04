@@ -1,0 +1,47 @@
+package sql
+
+import (
+	"errors"
+	"math"
+	"strconv"
+	"testing"
+
+	"github.com/vennictus/sceptre/internal/table"
+)
+
+// int64 -> float64 is exact or fails, wherever it happens: CAST, a literal
+// stored in or compared with a float column, and INSERT ... SELECT.
+func TestIntToFloatIsExactOrFails(t *testing.T) {
+	t.Parallel()
+	db := mustOpenSQLTable(t)
+	defer db.Close()
+	mustExec(t, db, "create table i (id int64 primary key)")
+	mustExec(t, db, "create table f (id int64 primary key, x float64)")
+	const two53 = int64(1) << 53
+	for _, n := range []int64{0, -1, two53, -two53, math.MinInt64} {
+		mustExec(t, db, "insert into i values (?)", table.Int64Value(n))
+	}
+	r := mustExec(t, db, "select id from i where CAST(CAST(id AS float64) AS int64) = id")
+	if len(r.Rows) != 5 {
+		t.Fatalf("exact conversions: %d rows, want 5", len(r.Rows))
+	}
+	mustExec(t, db, "insert into f select id, id from i")
+
+	for _, n := range []int64{two53 + 1, -two53 - 1, math.MaxInt64} {
+		db2 := mustOpenSQLTable(t)
+		mustExec(t, db2, "create table i (id int64 primary key)")
+		mustExec(t, db2, "create table f (id int64 primary key, x float64)")
+		mustExec(t, db2, "insert into i values (?)", table.Int64Value(n))
+		lit := strconv.FormatInt(n, 10)
+		for _, q := range []string{
+			"select id from i where CAST(id AS float64) > 0.5",
+			"insert into f values (1, " + lit + ")",
+			"insert into f select id, id from i",
+		} {
+			if _, err := Execute(db2, q); !errors.Is(err, table.ErrInvalidValue) {
+				t.Errorf("%d: %s: %v, want an invalid-value error", n, q, err)
+			}
+		}
+		db2.Close()
+	}
+}

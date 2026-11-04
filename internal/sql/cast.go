@@ -66,7 +66,11 @@ func castValue(v table.Value, to table.Type) (table.Value, error) {
 	case table.TypeFloat64:
 		switch v.Type {
 		case table.TypeInt64:
-			return table.Float64Value(float64(v.I64)), nil
+			f, err := exactFloat(v.I64)
+			if err != nil {
+				return table.Value{}, err
+			}
+			return table.Float64Value(f), nil
 		case table.TypeText:
 			f, err := strconv.ParseFloat(strings.TrimSpace(string(v.Bytes)), 64)
 			if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
