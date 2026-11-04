@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"strings"
@@ -230,14 +232,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out := response{}
 	switch path {
 	case "/api/execute", "/api/tx/execute":
-		var res sceptre.Result
-		if withTx {
-			res, err = h.active.tx.Execute(ctx, q.SQL, values...)
-		} else {
-			res, err = h.db.Execute(ctx, q.SQL, values...)
+		// Size the response before the statement is kept: a write whose result
+		// cannot be sent is rolled back, never committed and then reported as
+		// a failure the client might retry.
+		accept := func(res sceptre.Result) error {
+			wire := resultWire(res)
+			if h.tooLarge(response{Result: wire, Transaction: h.sessionFor(r)}) {
+				return fmt.Errorf("%w: the result exceeds the service response limit, so the statement was rolled back; use a smaller LIMIT, projection or RETURNING list", sceptre.ErrLimit)
+			}
+			out.Result = wire
+			return nil
 		}
-		if err == nil {
-			out.Result = resultWire(res)
+		if withTx {
+			_, err = h.active.tx.ExecuteChecked(ctx, accept, q.SQL, values...)
+		} else {
+			_, err = h.db.ExecuteChecked(ctx, accept, q.SQL, values...)
+		}
+		if err != nil {
+			out.Result = nil
 		}
 	case "/api/explain", "/api/tx/explain":
 		var p sceptre.Plan
@@ -387,6 +399,15 @@ func errorWire(err error) (*failure, int) {
 		status = 413
 	}
 	return &failure{string(code), err.Error()}, status
+}
+
+// tooLarge reports whether out would exceed the response limit once written.
+// It measures with the widest duration a response can carry, so a response
+// that passes here also passes in write.
+func (h *Handler) tooLarge(out response) bool {
+	out.DurationMS = -math.MaxFloat64
+	data, err := json.Marshal(out)
+	return err != nil || len(data) > h.opts.MaxResponseBytes
 }
 
 // write reports whether the client received the response. An oversized
