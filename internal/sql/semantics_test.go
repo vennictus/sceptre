@@ -45,3 +45,26 @@ func TestIntToFloatIsExactOrFails(t *testing.T) {
 		db2.Close()
 	}
 }
+
+// Comparing two literals gives the same answer whichever side each is on.
+func TestLiteralComparisonsAreSymmetric(t *testing.T) {
+	t.Parallel()
+	db := mustOpenSQLTable(t)
+	defer db.Close()
+	mustExec(t, db, "create table t (id int64 primary key)")
+	mustExec(t, db, "insert into t values (1)")
+	flip := map[string]string{"=": "=", "!=": "!=", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
+	pairs := [][2]string{{"1", "1.5"}, {"2", "2.0"}, {"-3", "-2.5"}, {"1.5", "1.5"}}
+	for op, rev := range flip {
+		for _, p := range pairs {
+			a := len(mustExec(t, db, "select id from t where "+p[0]+" "+op+" "+p[1]).Rows)
+			b := len(mustExec(t, db, "select id from t where "+p[1]+" "+rev+" "+p[0]).Rows)
+			if a != b {
+				t.Errorf("%s %s %s gave %d row(s), %s %s %s gave %d", p[0], op, p[1], a, p[1], rev, p[0], b)
+			}
+		}
+	}
+	if r := mustExec(t, db, "select id from t where 1 < 1.5 and 1.5 > 1 and 2 = 2.0"); len(r.Rows) != 1 {
+		t.Fatalf("mixed literal comparisons = %d rows, want 1", len(r.Rows))
+	}
+}

@@ -548,16 +548,20 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 		if left.value.IsNull() || right.value.IsNull() {
 			return evalResult{unknown: true, isBool: true}, nil
 		}
-		// A literal takes the type of the value it is compared with.
-		if lit, ok := expr.Left.(*Literal); ok {
-			if left.value, err = literalToValue(*lit, right.value.Type); err != nil {
-				return evalResult{}, err
-			}
+		// A literal takes the type of the value it is compared with; two
+		// literals take a common type.
+		leftLit, leftIsLit := expr.Left.(*Literal)
+		rightLit, rightIsLit := expr.Right.(*Literal)
+		switch {
+		case leftIsLit && rightIsLit:
+			left.value, right.value, err = literalPair(*leftLit, *rightLit)
+		case leftIsLit:
+			left.value, err = literalToValue(*leftLit, right.value.Type)
+		case rightIsLit:
+			right.value, err = literalToValue(*rightLit, left.value.Type)
 		}
-		if lit, ok := expr.Right.(*Literal); ok {
-			if right.value, err = literalToValue(*lit, left.value.Type); err != nil {
-				return evalResult{}, err
-			}
+		if err != nil {
+			return evalResult{}, err
 		}
 		result, err := compareValues(left.value, right.value, expr.Op)
 		if err != nil {
@@ -631,6 +635,21 @@ func exactFloat(n int64) (float64, error) {
 		return 0, fmt.Errorf("%w: int64 %d has no exact float64", table.ErrInvalidValue, n)
 	}
 	return f, nil
+}
+
+// literalPair gives two compared literals one type: an int64 and a float64
+// compare as float64 whichever side each is on; otherwise both keep their
+// own type, which validation has already found comparable.
+func literalPair(a, b Literal) (table.Value, table.Value, error) {
+	av, bv := literalUntyped(a), literalUntyped(b)
+	var err error
+	switch {
+	case a.Kind == LiteralInt && b.Kind == LiteralFloat:
+		av, err = literalToValue(a, table.TypeFloat64)
+	case a.Kind == LiteralFloat && b.Kind == LiteralInt:
+		bv, err = literalToValue(b, table.TypeFloat64)
+	}
+	return av, bv, err
 }
 
 func literalUntyped(literal Literal) table.Value {
