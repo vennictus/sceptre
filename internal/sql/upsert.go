@@ -19,6 +19,11 @@ func resolveConflictTarget(def table.TableDef, oc *OnConflict) (conflictTarget, 
 	if oc.Columns == nil {
 		return conflictTarget{any: true}, nil
 	}
+	for i, c := range oc.Columns {
+		if slices.Contains(oc.Columns[:i], c) {
+			return conflictTarget{}, fmt.Errorf("%w: ON CONFLICT names column %s twice", ErrExec, c)
+		}
+	}
 	sameSet := func(a, b []string) bool {
 		if len(a) != len(b) {
 			return false

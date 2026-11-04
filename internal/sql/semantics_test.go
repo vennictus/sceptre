@@ -69,6 +69,27 @@ func TestLiteralComparisonsAreSymmetric(t *testing.T) {
 	}
 }
 
+// A conflict target names each column once.
+func TestConflictTargetRejectsRepeatedColumns(t *testing.T) {
+	t.Parallel()
+	db := mustOpenSQLTable(t)
+	defer db.Close()
+	mustExec(t, db, "create table t (a int64, b int64, v int64, email text unique, primary key (a, b))")
+	mustExec(t, db, "insert into t values (1, 2, 0, 'x')")
+	for _, q := range []string{
+		"insert into t values (1, 2, 1, 'y') on conflict (a, a) do update set v = excluded.v",
+		"insert into t values (1, 3, 1, 'x') on conflict (email, email) do nothing",
+	} {
+		if err := execErr(t, db, q); !errors.Is(err, ErrExec) {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	if r := mustExec(t, db, "select v from t where a = 1 and b = 2"); r.Rows[0][0].I64 != 0 {
+		t.Fatalf("rejected upsert changed the row: %+v", r.Rows)
+	}
+	mustExec(t, db, "insert into t values (1, 2, 1, 'y') on conflict (b, a) do update set v = excluded.v")
+}
+
 // Whether a predicate is valid never depends on the rows or the index.
 func TestPredicateValidityIndependentOfIndexAndRows(t *testing.T) {
 	t.Parallel()
