@@ -221,6 +221,16 @@ func (db *DB) enterRead() error {
 // failure, inspect Error.Code: committed and uncertain outcomes require
 // different handling.
 func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result, error) {
+	return db.ExecuteChecked(ctx, nil, input, args...)
+}
+
+// ExecuteChecked is Execute with a last say over the result. When accept is
+// not nil it runs after the statement and before the automatic commit; if it
+// returns an error the statement is rolled back and that error is returned.
+// For a SELECT nothing is written, so accept only filters the result. Use it
+// to reject a result the caller cannot deliver (one too large to send, say)
+// while the statement can still be undone.
+func (db *DB) ExecuteChecked(ctx context.Context, accept func(Result) error, input string, args ...Value) (Result, error) {
 	switch kindOf(input, args) {
 	case kindControl:
 		return Result{}, executionError(fmt.Errorf("%w: use a Session or DB.Begin for transaction statements", ErrTransactionState))
@@ -230,14 +240,20 @@ func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result,
 			return Result{}, err
 		}
 		defer r.Close()
-		return r.Execute(ctx, input, args...)
+		result, err := r.Execute(ctx, input, args...)
+		if err == nil && accept != nil {
+			if err = accept(result); err != nil {
+				return Result{}, executionError(err)
+			}
+		}
+		return result, err
 	}
 	t, err := db.Begin(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	defer t.Rollback()
-	result, err := t.Execute(ctx, input, args...)
+	result, err := t.ExecuteChecked(ctx, accept, input, args...)
 	if err != nil {
 		return Result{}, err
 	}
@@ -365,6 +381,14 @@ func (db *DB) statement(input string, args []Value) (sql.Statement, error) {
 // Execute checks context before execution. In-flight engine work is not yet
 // interruptible. A cancellation after execution begins cannot undo a commit.
 func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, error) {
+	return t.ExecuteChecked(ctx, nil, input, args...)
+}
+
+// ExecuteChecked is Execute with a last say over the result. When accept is
+// not nil it runs after the statement, while its writes can still be undone;
+// if it returns an error the statement's writes are rolled back, the
+// transaction stays usable, and that error is returned.
+func (t *Tx) ExecuteChecked(ctx context.Context, accept func(Result) error, input string, args ...Value) (Result, error) {
 	t.db.mu.Lock()
 	defer t.db.mu.Unlock()
 	if err := t.ready(ctx); err != nil {
@@ -385,7 +409,11 @@ func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, 
 		return Result{}, executionError(err)
 	}
 	r, err := sql.ExecuteStatement(t.tables, stmt)
+	if err == nil && accept != nil {
+		err = accept(r)
+	}
 	if err != nil {
+		r = Result{}
 		if rbErr := t.inner.RollbackTo(mark); rbErr != nil {
 			err = errors.Join(err, rbErr)
 		}
