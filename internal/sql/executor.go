@@ -27,8 +27,26 @@ func Execute(db *table.DB, input string) (Result, error) {
 	return ExecuteStatement(db, stmt)
 }
 
-// ExecuteStatement runs a parsed statement against db.
+// ExecuteStatement runs a parsed statement against db. A statement that
+// writes is atomic: on a DB over a raw KV store its writes commit once,
+// together, and a failure leaves none of them behind.
 func ExecuteStatement(db *table.DB, stmt Statement) (Result, error) {
+	if _, ok := stmt.(*SelectStmt); ok || IsTransactionControl(stmt) {
+		return executeStatement(db, stmt)
+	}
+	var result Result
+	err := db.Atomic(func(db *table.DB) error {
+		r, err := executeStatement(db, stmt)
+		result = r
+		return err
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func executeStatement(db *table.DB, stmt Statement) (Result, error) {
 	switch stmt := stmt.(type) {
 	case *CreateTableStmt:
 		return executeCreateTable(db, stmt)
