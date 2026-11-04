@@ -2,7 +2,9 @@ package sceptre
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +65,44 @@ func BenchmarkAutocommitInsert(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				if _, err := db.Execute(ctx, "insert into posts (id, body) values (?, 'post body')", Int64(int64(i))); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkStagedUpsertUnique stages one multi-row upsert into a table with a
+// unique index, in a transaction that is rolled back. Each row probes the
+// unique index through the transaction's pending writes, so the cost per row
+// must stay flat as the statement grows.
+func BenchmarkStagedUpsertUnique(b *testing.B) {
+	for _, n := range []int{200, 800, 3200} {
+		b.Run(fmt.Sprintf("rows=%d", n), func(b *testing.B) {
+			ctx := context.Background()
+			db, err := Open(filepath.Join(b.TempDir(), "db"), Options{})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Execute(ctx, "create table t (id int64 primary key, v int64 unique)"); err != nil {
+				b.Fatal(err)
+			}
+			rows := make([]string, n)
+			for i := range rows {
+				rows[i] = fmt.Sprintf("(%d,%d)", i, i)
+			}
+			q := "insert into t values " + strings.Join(rows, ",") + " on conflict (id) do nothing"
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				tx, err := db.Begin(ctx)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := tx.Execute(ctx, q); err != nil {
+					b.Fatal(err)
+				}
+				if err := tx.Rollback(); err != nil {
 					b.Fatal(err)
 				}
 			}
