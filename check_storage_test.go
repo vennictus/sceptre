@@ -59,3 +59,30 @@ func TestRenameColumnToKeywordKeepsCheck(t *testing.T) {
 		t.Fatalf("rows = %+v", r.Rows)
 	}
 }
+
+func TestAddColumnKeepsEveryConstraint(t *testing.T) {
+	t.Parallel()
+	db, path := openTestDB(t, Options{})
+	execOK(t, db, "create table t (id int64 primary key)")
+	execOK(t, db, "insert into t values (1)")
+
+	execOK(t, db, "alter table t add score int64 check (score > 0)")
+	wantCode(t, db, CodeConstraint, "insert into t values (2, -1)")
+	execOK(t, db, "insert into t values (2, 5)")
+
+	// Existing rows read the default, so it must satisfy the new CHECK.
+	wantCode(t, db, CodeConstraint, "alter table t add level int64 not null default 0 check (level > 0)")
+	execOK(t, db, "alter table t add level int64 not null default 1 check (level > 0)")
+
+	// A check may also use other columns, and must be valid to be added.
+	wantCode(t, db, CodeInvalid, "alter table t add bad int64 check (missing > 0)")
+	wantCode(t, db, CodeInvalid, "alter table t add other int64 primary key")
+
+	db = reopen(t, db, path)
+	r := execOK(t, db, "select * from t")
+	if len(r.Columns) != 3 {
+		t.Fatalf("columns after failed ALTERs = %v, want id, score, level", r.Columns)
+	}
+	wantCode(t, db, CodeConstraint, "insert into t values (3, 1, 0)")
+	wantCode(t, db, CodeConstraint, "update t set score = 0 where id = 2")
+}

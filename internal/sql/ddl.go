@@ -52,26 +52,7 @@ func executeDropIndex(db *table.DB, stmt *DropIndexStmt) (Result, error) {
 func executeAlterTable(db *table.DB, stmt *AlterTableStmt) (Result, error) {
 	switch {
 	case stmt.Add != nil:
-		column, err := tableColumn(*stmt.Add, false)
-		if err != nil {
-			return Result{}, err
-		}
-		if column.DefaultNow {
-			// Existing rows read the time of the ALTER, as in PostgreSQL.
-			now := table.TimestampValue(time.Now())
-			column.Default = &now
-		}
-		if !column.Nullable && column.Default == nil {
-			return Result{}, fmt.Errorf("%w: an added NOT NULL column needs a DEFAULT", ErrExec)
-		}
-		if err := db.AddColumn(stmt.Table, column); err != nil {
-			return Result{}, err
-		}
-		if stmt.Add.Unique {
-			index := table.IndexDef{Name: stmt.Table + "_" + stmt.Add.Name + "_key", Columns: []string{stmt.Add.Name}, Unique: true}
-			return Result{}, db.CreateIndex(stmt.Table, index)
-		}
-		return Result{}, nil
+		return executeAddColumn(db, stmt.Table, stmt.Add)
 	case stmt.Drop != "":
 		def, ok, err := db.Table(stmt.Table)
 		if err != nil {
@@ -112,4 +93,65 @@ func executeAlterTable(db *table.DB, stmt *AlterTableStmt) (Result, error) {
 	default:
 		return Result{}, db.RenameTable(stmt.Table, stmt.RenameTo)
 	}
+}
+
+// executeAddColumn adds a column with every constraint its definition names,
+// or fails without changing the table. Existing rows read the column's
+// default, so they must satisfy its CHECKs and UNIQUE like new rows.
+func executeAddColumn(db *table.DB, tableName string, add *ColumnDef) (Result, error) {
+	if add.PrimaryKey {
+		return Result{}, fmt.Errorf("%w: ALTER TABLE cannot add a PRIMARY KEY column", ErrExec)
+	}
+	column, err := tableColumn(*add, false)
+	if err != nil {
+		return Result{}, err
+	}
+	if column.DefaultNow {
+		// Existing rows read the time of the ALTER, as in PostgreSQL.
+		now := table.TimestampValue(time.Now())
+		column.Default = &now
+	}
+	if !column.Nullable && column.Default == nil {
+		return Result{}, fmt.Errorf("%w: an added NOT NULL column needs a DEFAULT", ErrExec)
+	}
+	def, ok, err := db.Table(tableName)
+	if err != nil {
+		return Result{}, err
+	}
+	if !ok {
+		return Result{}, fmt.Errorf("%w: %s", table.ErrTableNotFound, tableName)
+	}
+	next := def
+	next.Columns = append(slices.Clone(def.Columns), column)
+	added, err := checkStrings(next, add.Checks)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := db.AddColumn(tableName, column); err != nil {
+		return Result{}, err
+	}
+	if add.Unique {
+		index := table.IndexDef{Name: tableName + "_" + add.Name + "_key", Columns: []string{add.Name}, Unique: true}
+		if err := db.CreateIndex(tableName, index); err != nil {
+			return Result{}, err
+		}
+	}
+	if len(added) == 0 {
+		return Result{}, nil
+	}
+	if err := db.SetChecks(tableName, append(slices.Clone(def.Checks), added...)); err != nil {
+		return Result{}, err
+	}
+	rows, err := scanRows(db, tableName, table.ScanBounds{})
+	if err != nil {
+		return Result{}, err
+	}
+	only := next
+	only.Checks = added
+	for _, row := range rows {
+		if err := checkRow(only, row); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{}, nil
 }
