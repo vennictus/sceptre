@@ -3,6 +3,7 @@ package tx
 import (
 	"bytes"
 	"sort"
+	"strings"
 
 	"github.com/vennictus/sceptre/internal/kv"
 	"github.com/vennictus/sceptre/internal/storage"
@@ -32,26 +33,43 @@ func (tx *Tx) Apply(mutations []kv.Mutation) error {
 // ScanIterator merges pending mutations over the snapshot, as of this call.
 // It conservatively tracks a range read as a read of the whole keyspace for
 // managed conflict detection.
+//
+// Opening a cursor is cheap: it reads the pending writes in place, through
+// the transaction's sorted key index. The first write to the transaction
+// while the cursor is still open freezes the cursor on a private copy of
+// the pending writes it could see, so it keeps reading them as of this call.
 func (tx *Tx) ScanIterator() kv.Cursor {
 	if err := tx.ensureOpen(); err != nil {
 		return &cursor{err: err}
 	}
 	tx.scanned = true
-	keys := make([]string, 0, len(tx.pending))
-	pending := make(map[string]kv.Mutation, len(tx.pending))
-	for key, p := range tx.pending {
-		keys = append(keys, key)
-		pending[key] = p.mutation
+	c := &cursor{base: tx.snapshot.Cursor(), tx: tx}
+	if tx.cursors == nil {
+		tx.cursors = make(map[*cursor]struct{})
 	}
-	sort.Strings(keys)
-	return &cursor{base: tx.snapshot.Cursor(), keys: keys, pending: pending}
+	tx.cursors[c] = struct{}{}
+	return c
+}
+
+// freezeCursors gives every open live cursor its own copy of the pending
+// writes before the transaction changes them.
+func (tx *Tx) freezeCursors() {
+	for c := range tx.cursors {
+		c.freeze()
+	}
+	clear(tx.cursors)
 }
 
 // cursor walks the snapshot and the transaction's pending writes as one
 // ordered sequence. A pending write replaces the snapshot entry with the same
 // key, and a pending delete hides it.
+//
+// A live cursor (tx set) reads tx.index and tx.pending at position (pb, pi).
+// A frozen one reads its own keys and pending at position pi.
 type cursor struct {
 	base    *storage.Cursor
+	tx      *Tx
+	pb      int
 	keys    []string
 	pending map[string]kv.Mutation
 	pi      int // next pending key
@@ -64,13 +82,91 @@ type cursor struct {
 
 func (c *cursor) Valid() bool { return c.err == nil && c.valid }
 
-func (c *cursor) Close() error { return nil } // the snapshot belongs to the Tx
+// Close stops tracking the cursor. The snapshot belongs to the Tx.
+func (c *cursor) Close() error {
+	if c.tx != nil {
+		delete(c.tx.cursors, c)
+	}
+	return nil
+}
+
+// freeze copies the pending writes a live cursor reads, keeping its position.
+func (c *cursor) freeze() {
+	tx := c.tx
+	if tx == nil {
+		return
+	}
+	n := 0
+	for _, blk := range tx.index.blocks {
+		n += len(blk)
+	}
+	keys := make([]string, 0, n)
+	pi := 0
+	for b, blk := range tx.index.blocks {
+		if b < c.pb {
+			pi += len(blk)
+		} else if b == c.pb {
+			pi += c.pi
+		}
+		keys = append(keys, blk...)
+	}
+	pending := make(map[string]kv.Mutation, len(keys))
+	for _, key := range keys {
+		pending[key] = tx.pending[key].mutation
+	}
+	c.tx, c.keys, c.pending, c.pb, c.pi = nil, keys, pending, 0, pi
+}
+
+func (c *cursor) hasPending() bool {
+	if c.tx != nil {
+		return c.tx.index.valid(c.pb, c.pi)
+	}
+	return c.pi < len(c.keys)
+}
+
+func (c *cursor) pendingKey() string {
+	if c.tx != nil {
+		return c.tx.index.blocks[c.pb][c.pi]
+	}
+	return c.keys[c.pi]
+}
+
+func (c *cursor) pendingMutation(key string) kv.Mutation {
+	if c.tx != nil {
+		return c.tx.pending[key].mutation
+	}
+	return c.pending[key]
+}
+
+func (c *cursor) advancePending() {
+	if c.tx != nil {
+		c.pb, c.pi = c.tx.index.next(c.pb, c.pi)
+		return
+	}
+	c.pi++
+}
+
+func (c *cursor) seekPending(key string) {
+	if c.tx != nil {
+		c.pb, c.pi = c.tx.index.find(key)
+		return
+	}
+	c.pi = sort.SearchStrings(c.keys, key)
+}
+
+// ready reports the cursor's error, or ErrClosed once its Tx has ended.
+func (c *cursor) ready() error {
+	if c.err == nil && c.tx != nil && c.tx.closed {
+		return c.fail(ErrClosed)
+	}
+	return c.err
+}
 
 func (c *cursor) SeekFirst() error {
-	if c.err != nil {
-		return c.err
+	if err := c.ready(); err != nil {
+		return err
 	}
-	c.pi = 0
+	c.seekPending("")
 	if err := c.base.SeekFirst(); err != nil {
 		return c.fail(err)
 	}
@@ -78,10 +174,10 @@ func (c *cursor) SeekFirst() error {
 }
 
 func (c *cursor) SeekGE(key []byte) error {
-	if c.err != nil {
-		return c.err
+	if err := c.ready(); err != nil {
+		return err
 	}
-	c.pi = sort.SearchStrings(c.keys, string(key))
+	c.seekPending(string(key))
 	if err := c.base.SeekGE(key); err != nil {
 		return c.fail(err)
 	}
@@ -89,12 +185,12 @@ func (c *cursor) SeekGE(key []byte) error {
 }
 
 func (c *cursor) Next() error {
-	if c.err != nil || !c.valid {
-		return c.err
+	if err := c.ready(); err != nil || !c.valid {
+		return err
 	}
 	// Advance every source positioned on the current key.
-	if c.pi < len(c.keys) && c.keys[c.pi] == string(c.key) {
-		c.pi++
+	if c.hasPending() && c.pendingKey() == string(c.key) {
+		c.advancePending()
 	}
 	if c.base.Valid() {
 		k, err := c.base.Key()
@@ -124,21 +220,21 @@ func (c *cursor) settle() error {
 		} else if err := c.base.Err(); err != nil {
 			return c.fail(err)
 		}
-		hasPending := c.pi < len(c.keys)
+		hasPending := c.hasPending()
 		switch {
 		case baseKey == nil && !hasPending:
 			c.valid = false
 			return nil
-		case hasPending && (baseKey == nil || c.keys[c.pi] <= string(baseKey)):
-			key := c.keys[c.pi]
-			m := c.pending[key]
+		case hasPending && (baseKey == nil || strings.Compare(c.pendingKey(), string(baseKey)) <= 0):
+			key := c.pendingKey()
+			m := c.pendingMutation(key)
 			if baseKey != nil && key == string(baseKey) {
 				if err := c.base.Next(); err != nil {
 					return c.fail(err)
 				}
 			}
 			if m.Delete {
-				c.pi++
+				c.advancePending()
 				continue
 			}
 			// Keep the pending key current; Next advances past it.
@@ -152,13 +248,13 @@ func (c *cursor) settle() error {
 }
 
 func (c *cursor) Deref() ([]byte, []byte, error) {
-	if c.err != nil {
-		return nil, nil, c.err
+	if err := c.ready(); err != nil {
+		return nil, nil, err
 	}
 	if !c.valid {
 		return nil, nil, storage.ErrCursorInvalid
 	}
-	if c.value != nil || c.pi < len(c.keys) && c.keys[c.pi] == string(c.key) {
+	if c.value != nil || c.hasPending() && c.pendingKey() == string(c.key) {
 		return cloneBytes(c.key), cloneBytes(c.value), nil
 	}
 	v, err := c.base.Value()

@@ -43,6 +43,8 @@ type Tx struct {
 	reads    map[string]struct{}
 	writes   map[string]struct{}
 	order    []string
+	index    keyIndex             // pending keys in sorted order, for scans
+	cursors  map[*cursor]struct{} // open cursors reading pending writes in place
 	closed   bool
 	scanned  bool
 	undo     []undoEntry // kept only while a savepoint exists
@@ -176,6 +178,7 @@ func (tx *Tx) Abort() {
 }
 
 func (tx *Tx) record(mutation kv.Mutation) {
+	tx.freezeCursors()
 	key := string(mutation.Key)
 	prev, exists := tx.pending[key]
 	if tx.marks > 0 {
@@ -183,6 +186,7 @@ func (tx *Tx) record(mutation kv.Mutation) {
 	}
 	if !exists {
 		tx.order = append(tx.order, key)
+		tx.index.insert(key)
 	}
 	tx.pending[key] = pendingMutation{mutation: mutation}
 	tx.writes[key] = struct{}{}
@@ -296,6 +300,8 @@ func (tx *Tx) close() {
 	tx.reads = nil
 	tx.writes = nil
 	tx.order = nil
+	tx.index = keyIndex{}
+	tx.cursors = nil
 	tx.undo = nil
 	tx.snapshot.Release()
 	tx.snapshot = nil
