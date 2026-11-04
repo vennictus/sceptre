@@ -34,26 +34,27 @@ function renderSchema(defs) {
   for (const def of defs) {
     const details = element('details'); details.open = true; details.append(element('summary',def.name));
     const list = element('ul');
-    for (const col of def.columns) { const li = element('li'); li.append(element('span',col.name),element('small',`${col.type}${def.primary_key.includes(col.name) ? ' · PK' : ''}`)); list.append(li); }
+    for (const col of def.columns) { const li = element('li'); li.append(element('span',col.name),element('small',`${col.type}${def.primary_key.includes(col.name) ? ' · PK' : col.nullable ? '' : ' · NOT NULL'}`)); list.append(li); }
     details.append(list);
-    for (const index of def.indexes) details.append(element('div',`${index.name} (${index.columns.join(', ')})`,'index'));
+    for (const index of def.indexes) details.append(element('div',`${index.unique ? 'unique ' : ''}${index.name} (${index.columns.join(', ')})`,'index'));
     $('schema').append(details);
   }
 }
 async function refresh() { const data = await request('schema'); renderSchema(data.schema || []); }
+// Binding types match the service wire: every value is a string; bytes are base64.
+const paramTypes = [['int64','Integer'],['float64','Float'],['bool','Boolean'],['text','Text / UTF-8'],['timestamp','Timestamp (RFC 3339)'],['bytes','Base64 bytes'],['null','NULL']];
 function params() {
   return [...$('params').children].map(row => {
     const type = row.querySelector('select').value, value = row.querySelector('input').value;
-    if (type === 'int64') { if (!/^-?\d+$/.test(value)) throw new Error('Integer parameters require decimal digits.'); return {type, value}; }
-    if (type === 'base64') return {type:'bytes', value};
-    const bytes = new TextEncoder().encode(value); let raw = ''; for (const byte of bytes) raw += String.fromCharCode(byte);
-    return {type:'bytes',value:btoa(raw)};
+    if (type === 'int64' && !/^-?\d+$/.test(value)) throw new Error('Integer parameters require decimal digits.');
+    if (type === 'bool' && value !== 'true' && value !== 'false') throw new Error('Boolean parameters must be true or false.');
+    return {type, value: type === 'null' ? '' : value};
   });
 }
 function addParam() {
   const row = element('div',undefined,'param'); const n = $('params').children.length + 1;
   const type = element('select'); type.setAttribute('aria-label',`Parameter ${n} type`);
-  for (const [value,label] of [['int64','Integer'],['text','Text / UTF-8'],['base64','Base64 bytes']]) { const opt = element('option',label); opt.value = value; type.append(opt); }
+  for (const [value,label] of paramTypes) { const opt = element('option',label); opt.value = value; type.append(opt); }
   const input = element('input'); input.setAttribute('aria-label',`Parameter ${n} value`); input.placeholder = 'Value';
   const remove = element('button','×','quiet'); remove.setAttribute('aria-label','Remove parameter'); remove.addEventListener('click',()=>row.remove());
   row.append(element('span',String(n),'hint'),type,input,remove); $('params').append(row);
@@ -63,6 +64,12 @@ function bytesDisplay(value) {
   try { const text = new TextDecoder('utf-8',{fatal:true}).decode(bytes); if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) return `base64:${value}`; return text; }
   catch { return `base64:${value}`; }
 }
+// Only bytes are base64 on the wire; every other type is already display text.
+function cellText(value) {
+  if (value.type === 'null') return 'NULL';
+  if (value.type === 'bytes') { try { return bytesDisplay(value.value); } catch { return `base64:${value.value}`; } }
+  return value.value;
+}
 function renderResult(result) {
   $('output').replaceChildren();
   if (!result.columns.length) { $('output').append(element('p',`${result.rows_affected} row(s) affected`,'empty')); return; }
@@ -70,7 +77,7 @@ function renderResult(result) {
   const table = element('table'), head = element('thead'), hr = element('tr');
   for (const name of result.columns) hr.append(element('th',name)); head.append(hr); table.append(head);
   const tbody = element('tbody');
-  for (const row of result.rows) { const tr = element('tr'); for (const value of row) { const td = element('td',value.type === 'int64' ? value.value : bytesDisplay(value.value)); td.title = `${value.type}: ${value.value}`; tr.append(td); } tbody.append(tr); }
+  for (const row of result.rows) { const tr = element('tr'); for (const value of row) { const td = element('td',cellText(value),value.type === 'null' ? 'null' : undefined); td.title = value.type === 'null' ? 'null' : `${value.type}: ${value.value}`; tr.append(td); } tbody.append(tr); }
   table.append(tbody); $('output').append(table);
 }
 async function execute(explain) {
@@ -78,20 +85,24 @@ async function execute(explain) {
   if (!sql.trim()) throw new Error('Enter a SQL statement.');
   const started = performance.now();
   try {
-    const data = await request(explain ? 'explain' : 'execute', {sql,params:bindings});
-    $('metrics').textContent = `${data.duration_ms.toFixed(2)} ms service · ${(performance.now()-started).toFixed(0)} ms round trip${data.result ? ` · ${data.result.rows.length} row(s)` : ''}`;
-    if (explain) $('output').replaceChildren(element('pre',JSON.stringify(data.plan,null,2))); else renderResult(data.result);
+    let data;
+    try { data = await request(explain ? 'explain' : 'execute', {sql,params:bindings}); }
+    catch(error) {
+      $('output').replaceChildren(element('pre',error.message,'error')); $('metrics').textContent = 'Execution failed';
+      history.unshift({sql,bindings:structuredClone(bindings),ok:false}); history.splice(20); throw error;
+    }
+    // From here the statement has succeeded (and may have committed). Nothing
+    // below may report it as failed, or a retry could repeat the write.
     history.unshift({sql,bindings:structuredClone(bindings),ok:true}); history.splice(20);
-    // The statement already succeeded; a failed schema refresh must not be reported as a failed statement.
+    $('metrics').textContent = `${data.duration_ms.toFixed(2)} ms service · ${(performance.now()-started).toFixed(0)} ms round trip${data.result ? ` · ${data.result.rows.length} row(s)` : ''}`;
+    try { if (explain) $('output').replaceChildren(element('pre',JSON.stringify(data.plan,null,2))); else renderResult(data.result); }
+    catch(error) { $('output').replaceChildren(element('pre',`Statement succeeded, but its result could not be displayed: ${error.message}`,'error')); }
     try { await refresh(); } catch(error) { $('notice').textContent = `Statement succeeded, but the schema refresh failed: ${error.message}`; }
-  } catch(error) {
-    $('output').replaceChildren(element('pre',error.message,'error')); $('metrics').textContent = 'Execution failed';
-    history.unshift({sql,bindings:structuredClone(bindings),ok:false}); history.splice(20); throw error;
   } finally {
     $('history').replaceChildren();
     for (const item of history) { const li = element('li'), button = element('button',`${item.ok ? '✓' : '×'} ${item.sql}`); button.addEventListener('click',()=>{
       $('sql').value = item.sql; $('params').replaceChildren();
-      for (const binding of item.bindings) { addParam(); const row = $('params').lastElementChild; row.querySelector('select').value = binding.type === 'int64' ? 'int64' : 'base64'; row.querySelector('input').value = binding.value; }
+      for (const binding of item.bindings) { addParam(); const row = $('params').lastElementChild; row.querySelector('select').value = binding.type; row.querySelector('input').value = binding.value; }
     }); li.append(button); $('history').append(li); }
   }
 }
