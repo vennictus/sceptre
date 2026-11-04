@@ -68,3 +68,37 @@ func TestLiteralComparisonsAreSymmetric(t *testing.T) {
 		t.Fatalf("mixed literal comparisons = %d rows, want 1", len(r.Rows))
 	}
 }
+
+// Whether a predicate is valid never depends on the rows or the index.
+func TestPredicateValidityIndependentOfIndexAndRows(t *testing.T) {
+	t.Parallel()
+	bad := []struct {
+		q    string
+		args []table.Value
+	}{
+		{"select * from t where created = 'not-a-time'", nil},
+		{"select * from t where CAST('abc' AS int64) = id", nil},
+		{"select * from t where body = ?", []table.Value{table.BytesValue([]byte{0xff})}},
+		{"select * from t where x = 9007199254740993", nil},
+	}
+	for _, indexed := range []bool{false, true} {
+		db := mustOpenSQLTable(t)
+		mustExec(t, db, "create table t (id int64 primary key, created timestamp, body text, x float64)")
+		if indexed {
+			mustExec(t, db, "create index t_created on t (created)")
+			mustExec(t, db, "create index t_body on t (body)")
+			mustExec(t, db, "create index t_x on t (x)")
+		}
+		for _, c := range bad {
+			stmt, err := ParseParameters(c.q, c.args)
+			if err == nil {
+				_, err = ExecuteStatement(db, stmt)
+			}
+			if !errors.Is(err, table.ErrInvalidValue) {
+				t.Errorf("indexed=%v, empty table: %s: %v, want an invalid-value error", indexed, c.q, err)
+			}
+		}
+		db.Close()
+	}
+
+}
