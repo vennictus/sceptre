@@ -92,7 +92,9 @@ transaction are described above.
 - A request that times out (15 seconds) or whose client disconnects rolls back
   its transaction.
 - An oversized response (over 8 MiB) returns `413 limit` and keeps the
-  transaction open.
+  transaction open. A write whose result is too large (a big `RETURNING`) is
+  rolled back first, in autocommit and in a transaction, so a `limit` error
+  never hides a write that was applied: retrying it is safe.
 
 As with the Go API, a commit error with code `committed` means the transaction
 was applied, and `uncertain` means the outcome is unknown until the database is

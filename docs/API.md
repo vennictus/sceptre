@@ -53,6 +53,14 @@ A failed statement preserves earlier successful statements and leaves the
 transaction usable. A failed statement does not partially stage its own changes:
 each runs under an internal savepoint, including statements that write in several
 steps such as an upsert.
+
+`ExecuteChecked` (on `DB`, `Tx` and `Session`) takes an `accept` function that
+sees the statement's result before it is kept: before the automatic commit, or
+while the transaction can still undo it. If `accept` returns an error the
+statement is rolled back and that error is returned. Use it when the caller may
+be unable to deliver a result, such as a `RETURNING` too large to send, so a
+write is never committed and then reported as failed.
+
 **Commit ends the transaction on every outcome**, including canceled commit and
 definitely aborted storage errors. Start a new transaction if retry is appropriate.
 Repeated rollback is safe; execution and repeated commit after completion return
