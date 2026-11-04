@@ -3,6 +3,7 @@ package sql
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/vennictus/sceptre/internal/table"
@@ -87,15 +88,25 @@ func executeAlterTable(db *table.DB, stmt *AlterTableStmt) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
+		var checks []string
+		if ok && len(def.Checks) > 0 {
+			// Rewrite and validate the checks before changing anything.
+			renamed := def
+			renamed.Columns = slices.Clone(def.Columns)
+			for i := range renamed.Columns {
+				if renamed.Columns[i].Name == stmt.RenameFrom {
+					renamed.Columns[i].Name = stmt.RenameTo
+				}
+			}
+			if checks, err = renameInChecks(renamed, stmt.RenameFrom, stmt.RenameTo); err != nil {
+				return Result{}, err
+			}
+		}
 		if err := db.RenameColumn(stmt.Table, stmt.RenameFrom, stmt.RenameTo); err != nil {
 			return Result{}, err
 		}
-		if !ok || len(def.Checks) == 0 {
+		if checks == nil {
 			return Result{}, nil
-		}
-		checks, err := renameInChecks(def.Checks, stmt.RenameFrom, stmt.RenameTo)
-		if err != nil {
-			return Result{}, err
 		}
 		return Result{}, db.SetChecks(stmt.Table, checks)
 	default:
