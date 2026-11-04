@@ -208,8 +208,18 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	empty := Result{}
 	if stmt.Returning != nil {
-		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+		if empty, err = returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
+	}
+	var target conflictTarget
+	if stmt.OnConflict != nil {
+		if target, err = resolveConflictTarget(def, stmt.OnConflict); err != nil {
+			return Result{}, err
+		}
+		if err := validateConflictSet(def, stmt.OnConflict.Set); err != nil {
 			return Result{}, err
 		}
 	}
@@ -218,7 +228,7 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 		return Result{}, err
 	}
 	if len(rows) == 0 {
-		return Result{}, nil
+		return empty, nil
 	}
 	if err := fillAutoIncrement(db, def, rows); err != nil {
 		return Result{}, err
@@ -235,7 +245,7 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 		}
 	}
 	if stmt.OnConflict != nil {
-		if records, err = insertWithConflicts(db, def, stmt.OnConflict, records); err != nil {
+		if records, err = insertWithConflicts(db, def, stmt.OnConflict, target, records); err != nil {
 			return Result{}, err
 		}
 	} else if err := db.InsertMany(stmt.Table, records); err != nil {
@@ -276,16 +286,44 @@ func insertColumns(def table.TableDef, names []string) ([]table.Column, error) {
 	return out, nil
 }
 
+// checkSelectFits checks, from the schemas alone, that a SELECT's columns
+// can fill the INSERT columns by position: same type, or int64 into
+// float64. A mismatch fails even when the SELECT has no rows.
+func checkSelectFits(db *table.DB, sel *SelectStmt, columns []table.Column) error {
+	src, ok, err := db.Table(sel.Table)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return table.ErrTableNotFound
+	}
+	names, err := selectColumns(src, sel)
+	if err != nil {
+		return err
+	}
+	if len(names) != len(columns) {
+		return fmt.Errorf("%w: SELECT returns %d columns for %d", ErrExec, len(names), len(columns))
+	}
+	for i, name := range names {
+		from, _ := columnType(src, name)
+		to := columns[i].Type
+		if from != to && !(from == table.TypeInt64 && to == table.TypeFloat64) {
+			return fmt.Errorf("%w: SELECT column %d (%s) is %s, %s is %s", ErrExec, i+1, name, from, columns[i].Name, to)
+		}
+	}
+	return nil
+}
+
 // insertRows builds the value maps an INSERT writes, from VALUES literals or
 // from the rows of its SELECT, matched to columns by position.
 func insertRows(db *table.DB, def table.TableDef, columns []table.Column, stmt *InsertStmt) ([]map[string]table.Value, error) {
 	if stmt.Select != nil {
+		if err := checkSelectFits(db, stmt.Select, columns); err != nil {
+			return nil, err
+		}
 		res, err := executeSelect(db, stmt.Select)
 		if err != nil {
 			return nil, err
-		}
-		if len(res.Columns) != len(columns) {
-			return nil, fmt.Errorf("%w: SELECT returns %d columns for %d", ErrExec, len(res.Columns), len(columns))
 		}
 		rows := make([]map[string]table.Value, len(res.Rows))
 		for i, src := range res.Rows {

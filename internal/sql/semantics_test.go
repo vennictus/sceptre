@@ -90,6 +90,38 @@ func TestConflictTargetRejectsRepeatedColumns(t *testing.T) {
 	mustExec(t, db, "insert into t values (1, 2, 1, 'y') on conflict (b, a) do update set v = excluded.v")
 }
 
+// An INSERT ... SELECT is checked the same way whether or not the SELECT
+// returns rows, and an empty one still has its RETURNING columns.
+func TestEmptyInsertSelectIsCheckedAndShaped(t *testing.T) {
+	t.Parallel()
+	db := mustOpenSQLTable(t)
+	defer db.Close()
+	mustExec(t, db, "create table t (id int64 primary key, v int64)")
+	mustExec(t, db, "create table src (id text primary key)")
+	mustExec(t, db, "create table ints (id int64 primary key, n int64)")
+	mustExec(t, db, "create table dst (id int64 primary key, x float64)")
+
+	r := mustExec(t, db, "insert into t select id, v from t returning id")
+	if len(r.Columns) != 1 || r.Columns[0] != "id" || len(r.Rows) != 0 {
+		t.Fatalf("empty INSERT SELECT RETURNING = %+v", r)
+	}
+	r = mustExec(t, db, "insert into t select * from t on conflict do nothing returning *")
+	if len(r.Columns) != 2 {
+		t.Fatalf("empty upsert RETURNING columns = %v", r.Columns)
+	}
+	for _, q := range []string{
+		"insert into t select * from t on conflict (v) do nothing",
+		"insert into t select * from t on conflict (id) do update set nope = 1",
+		"insert into dst (id) select id from src",
+		"insert into t select id from t",
+	} {
+		if err := execErr(t, db, q); !errors.Is(err, ErrExec) {
+			t.Errorf("%s on empty tables: %v, want an execution error", q, err)
+		}
+	}
+	mustExec(t, db, "insert into dst select id, n from ints") // int64 widens into float64
+}
+
 // Whether a predicate is valid never depends on the rows or the index.
 func TestPredicateValidityIndependentOfIndexAndRows(t *testing.T) {
 	t.Parallel()
@@ -121,5 +153,4 @@ func TestPredicateValidityIndependentOfIndexAndRows(t *testing.T) {
 		}
 		db.Close()
 	}
-
 }
