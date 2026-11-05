@@ -47,12 +47,16 @@ type failure struct {
 	Message string `json:"message"`
 }
 type response struct {
-	Result      json.RawMessage `json:"result,omitempty"` // an encoded *result
-	Schema      []schema        `json:"schema,omitempty"`
-	Plan        *plan           `json:"plan,omitempty"`
-	Transaction *transaction    `json:"transaction"`
-	Error       *failure        `json:"error,omitempty"`
-	DurationMS  float64         `json:"duration_ms"`
+	Result      *result      `json:"result,omitempty"`
+	Schema      []schema     `json:"schema,omitempty"`
+	Plan        *plan        `json:"plan,omitempty"`
+	Transaction *transaction `json:"transaction"`
+	Error       *failure     `json:"error,omitempty"`
+	DurationMS  float64      `json:"duration_ms"`
+	// encoded is a write's result, already encoded to size it before the
+	// write was kept. write splices it in as "result", so it is not encoded
+	// twice (and not rescanned, as json.RawMessage would be).
+	encoded []byte
 }
 
 // Handler owns service sessions, but not DB lifetime. Close rolls sessions back.
@@ -236,14 +240,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// cannot be sent is rolled back, never committed and then reported as
 		// a failure the client might retry.
 		accept := func(res sceptre.Result) error {
-			raw, err := json.Marshal(resultWire(res))
+			encoded, err := json.Marshal(resultWire(res))
 			if err != nil {
 				return err
 			}
-			if h.tooLarge(raw, h.sessionFor(r)) {
+			if h.tooLarge(encoded, h.sessionFor(r)) {
 				return fmt.Errorf("%w: the result exceeds the service response limit, so the statement was rolled back; use a smaller LIMIT, projection or RETURNING list", sceptre.ErrLimit)
 			}
-			out.Result = raw
+			out.encoded = encoded
 			return nil
 		}
 		if withTx {
@@ -252,7 +256,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, err = h.db.ExecuteChecked(ctx, accept, q.SQL, values...)
 		}
 		if err != nil {
-			out.Result = nil
+			out.encoded = nil
 		}
 	case "/api/explain", "/api/tx/explain":
 		var p sceptre.Plan
@@ -357,7 +361,7 @@ func (h *Handler) serveRead(ctx context.Context, w http.ResponseWriter, path str
 	case "/api/execute":
 		var res sceptre.Result
 		if res, err = h.db.Execute(ctx, q.SQL, values...); err == nil {
-			out.Result, err = json.Marshal(resultWire(res))
+			out.Result = resultWire(res)
 		}
 	case "/api/explain":
 		var p sceptre.Plan
@@ -407,17 +411,47 @@ func errorWire(err error) (*failure, int) {
 // tooLarge reports whether a response carrying the encoded result would
 // exceed the response limit once written. It measures the rest of the
 // response with the widest duration it can carry, so a result that passes
-// here also passes in write, and the result itself is encoded only once.
-func (h *Handler) tooLarge(result json.RawMessage, tx *transaction) bool {
-	envelope, err := json.Marshal(response{Result: json.RawMessage("0"), Transaction: tx, DurationMS: -math.MaxFloat64})
-	return err != nil || len(envelope)-1+len(result) > h.opts.MaxResponseBytes
+// here also passes in write.
+func (h *Handler) tooLarge(encoded []byte, tx *transaction) bool {
+	rest, err := json.Marshal(response{Transaction: tx, DurationMS: -math.MaxFloat64})
+	return err != nil || splicedLen(rest, encoded) > h.opts.MaxResponseBytes
+}
+
+const resultKey = `"result":`
+
+// splice inserts an encoded result as the first member of rest, an encoded
+// response without one. rest always has members ("transaction" and
+// "duration_ms" are never omitted), so a comma follows the result.
+func splice(rest, encoded []byte) []byte {
+	out := make([]byte, 0, splicedLen(rest, encoded))
+	out = append(out, '{')
+	out = append(out, resultKey...)
+	out = append(out, encoded...)
+	out = append(out, ',')
+	return append(out, rest[1:]...)
+}
+
+func splicedLen(rest, encoded []byte) int { return len(rest) + len(resultKey) + len(encoded) + 1 }
+
+// encodeResponse encodes out, splicing in a pre-encoded write result.
+func encodeResponse(out response) ([]byte, error) {
+	if out.encoded == nil {
+		return json.Marshal(out)
+	}
+	encoded := out.encoded
+	out.Result = nil
+	rest, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	return splice(rest, encoded), nil
 }
 
 // write reports whether the client received the response. An oversized
 // result is replaced by a limit error but keeps the transaction open: only a
 // client that cannot be reached loses its transaction.
 func (h *Handler) write(w http.ResponseWriter, status int, out response) bool {
-	data, err := json.Marshal(out)
+	data, err := encodeResponse(out)
 	if err != nil || len(data) > h.opts.MaxResponseBytes {
 		status = http.StatusRequestEntityTooLarge
 		data, _ = json.Marshal(response{
