@@ -47,12 +47,12 @@ type failure struct {
 	Message string `json:"message"`
 }
 type response struct {
-	Result      *result      `json:"result,omitempty"`
-	Schema      []schema     `json:"schema,omitempty"`
-	Plan        *plan        `json:"plan,omitempty"`
-	Transaction *transaction `json:"transaction"`
-	Error       *failure     `json:"error,omitempty"`
-	DurationMS  float64      `json:"duration_ms"`
+	Result      json.RawMessage `json:"result,omitempty"` // an encoded *result
+	Schema      []schema        `json:"schema,omitempty"`
+	Plan        *plan           `json:"plan,omitempty"`
+	Transaction *transaction    `json:"transaction"`
+	Error       *failure        `json:"error,omitempty"`
+	DurationMS  float64         `json:"duration_ms"`
 }
 
 // Handler owns service sessions, but not DB lifetime. Close rolls sessions back.
@@ -236,11 +236,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// cannot be sent is rolled back, never committed and then reported as
 		// a failure the client might retry.
 		accept := func(res sceptre.Result) error {
-			wire := resultWire(res)
-			if h.tooLarge(response{Result: wire, Transaction: h.sessionFor(r)}) {
+			raw, err := json.Marshal(resultWire(res))
+			if err != nil {
+				return err
+			}
+			if h.tooLarge(raw, h.sessionFor(r)) {
 				return fmt.Errorf("%w: the result exceeds the service response limit, so the statement was rolled back; use a smaller LIMIT, projection or RETURNING list", sceptre.ErrLimit)
 			}
-			out.Result = wire
+			out.Result = raw
 			return nil
 		}
 		if withTx {
@@ -354,7 +357,7 @@ func (h *Handler) serveRead(ctx context.Context, w http.ResponseWriter, path str
 	case "/api/execute":
 		var res sceptre.Result
 		if res, err = h.db.Execute(ctx, q.SQL, values...); err == nil {
-			out.Result = resultWire(res)
+			out.Result, err = json.Marshal(resultWire(res))
 		}
 	case "/api/explain":
 		var p sceptre.Plan
@@ -401,13 +404,13 @@ func errorWire(err error) (*failure, int) {
 	return &failure{string(code), err.Error()}, status
 }
 
-// tooLarge reports whether out would exceed the response limit once written.
-// It measures with the widest duration a response can carry, so a response
-// that passes here also passes in write.
-func (h *Handler) tooLarge(out response) bool {
-	out.DurationMS = -math.MaxFloat64
-	data, err := json.Marshal(out)
-	return err != nil || len(data) > h.opts.MaxResponseBytes
+// tooLarge reports whether a response carrying the encoded result would
+// exceed the response limit once written. It measures the rest of the
+// response with the widest duration it can carry, so a result that passes
+// here also passes in write, and the result itself is encoded only once.
+func (h *Handler) tooLarge(result json.RawMessage, tx *transaction) bool {
+	envelope, err := json.Marshal(response{Result: json.RawMessage("0"), Transaction: tx, DurationMS: -math.MaxFloat64})
+	return err != nil || len(envelope)-1+len(result) > h.opts.MaxResponseBytes
 }
 
 // write reports whether the client received the response. An oversized
