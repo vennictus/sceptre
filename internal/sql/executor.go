@@ -233,6 +233,10 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 	if err := fillAutoIncrement(db, def, rows); err != nil {
 		return Result{}, err
 	}
+	checks, err := prepareChecks(def)
+	if err != nil {
+		return Result{}, err
+	}
 	now := time.Now()
 	records := make([]table.Record, len(rows))
 	for i, values := range rows {
@@ -240,7 +244,7 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 			return Result{}, err
 		}
 		records[i] = table.NewRecord(values)
-		if err := checkRow(def, records[i]); err != nil {
+		if err := checks.check(records[i]); err != nil {
 			return Result{}, err
 		}
 	}
@@ -436,13 +440,17 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 		}
 	}
 
+	checks, err := prepareChecks(def)
+	if err != nil {
+		return Result{}, err
+	}
 	updates := make([]table.Record, 0, len(matchesRows))
 	for _, row := range matchesRows {
 		updated := table.NewRecord(row.Values)
 		for column, value := range assignments {
 			updated.Values[column] = value
 		}
-		if err := checkRow(def, updated); err != nil {
+		if err := checks.check(updated); err != nil {
 			return Result{}, err
 		}
 		updates = append(updates, updated)

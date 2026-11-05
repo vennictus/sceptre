@@ -148,8 +148,12 @@ func executeAddColumn(db *table.DB, tableName string, add *ColumnDef) (Result, e
 	}
 	only := next
 	only.Checks = added
+	checks, err := prepareChecks(only)
+	if err != nil {
+		return Result{}, err
+	}
 	for _, row := range rows {
-		if err := checkRow(only, row); err != nil {
+		if err := checks.check(row); err != nil {
 			return Result{}, err
 		}
 	}

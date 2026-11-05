@@ -114,6 +114,10 @@ func validateConflictSet(def table.TableDef, set []Assignment) error {
 // it, skipping or updating rows that hit the conflict target. It returns the
 // rows written, inserted or updated.
 func insertWithConflicts(db *table.DB, def table.TableDef, oc *OnConflict, target conflictTarget, records []table.Record) ([]table.Record, error) {
+	checks, err := prepareChecks(def)
+	if err != nil {
+		return nil, err
+	}
 	var written []table.Record
 	for _, record := range records {
 		existing, conflict, err := findConflict(db, def, target, record.Values)
@@ -143,7 +147,7 @@ func insertWithConflicts(db *table.DB, def table.TableDef, oc *OnConflict, targe
 			}
 			updated.Values[a.Column] = v
 		}
-		if err := checkRow(def, updated); err != nil {
+		if err := checks.check(updated); err != nil {
 			return nil, err
 		}
 		if err := db.Update(def.Name, updated); err != nil {

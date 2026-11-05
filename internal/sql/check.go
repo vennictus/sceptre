@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -102,69 +101,42 @@ func storeLiteral(l Literal) string {
 	}
 }
 
-// parsedChecks caches stored CHECK text by its parsed expression, so rows
-// are checked without reparsing. Cached expressions are never mutated:
-// evaluation only reads them, and renameInChecks parses its own copy.
-var parsedChecks = struct {
-	sync.Mutex
-	m map[string]Expr
-}{m: make(map[string]Expr)}
+// rowChecks are a table's CHECKs, parsed once for one statement and then
+// evaluated for each row it writes.
+type rowChecks []Expr
 
-const maxParsedChecks = 4096
-
-func parsedCheck(text string) (Expr, error) {
-	parsedChecks.Lock()
-	expr, ok := parsedChecks.m[text]
-	parsedChecks.Unlock()
-	if ok {
-		return expr, nil
+func prepareChecks(def table.TableDef) (rowChecks, error) {
+	out := make(rowChecks, 0, len(def.Checks))
+	for _, text := range def.Checks {
+		expr, err := ParseExpr(text)
+		if err != nil {
+			return nil, fmt.Errorf("stored check %s: %w", text, err)
+		}
+		out = append(out, expr)
 	}
-	expr, err := ParseExpr(text)
-	if err != nil {
-		return nil, fmt.Errorf("stored check %s: %w", text, err)
-	}
-	parsedChecks.Lock()
-	if len(parsedChecks.m) >= maxParsedChecks {
-		clear(parsedChecks.m)
-	}
-	parsedChecks.m[text] = expr
-	parsedChecks.Unlock()
-	return expr, nil
+	return out, nil
 }
 
-// checkRow fails when row makes any of the table's checks false. A check
-// that is unknown, because of NULL, passes, as in standard SQL.
-func checkRow(def table.TableDef, row table.Record) error {
-	for _, text := range def.Checks {
-		expr, err := parsedCheck(text)
-		if err != nil {
-			return err
-		}
+// check fails when row makes any of the checks false. A check that is
+// unknown, because of NULL, passes, as in standard SQL.
+func (c rowChecks) check(row table.Record) error {
+	for _, expr := range c {
 		r, err := evalExpr(expr, row)
 		if err != nil {
 			return err
 		}
 		if r.isBool && !r.unknown && !r.bool {
-			return fmt.Errorf("%w: %s", ErrCheck, displayCheck(text))
+			return fmt.Errorf("%w: %s", ErrCheck, FormatExpr(expr))
 		}
 	}
 	return nil
-}
-
-// displayCheck turns stored check text back into the readable form.
-func displayCheck(text string) string {
-	expr, err := parsedCheck(text)
-	if err != nil {
-		return text
-	}
-	return FormatExpr(expr)
 }
 
 // checksReferencing returns the checks that mention column, for display.
 func checksReferencing(def table.TableDef, column string) []string {
 	var out []string
 	for _, text := range def.Checks {
-		expr, err := parsedCheck(text)
+		expr, err := ParseExpr(text)
 		if err == nil && exprMentions(expr, column) {
 			out = append(out, FormatExpr(expr))
 		}
