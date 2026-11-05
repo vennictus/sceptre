@@ -15,7 +15,13 @@ func TestQuotedIdentifiersAndTypedLiterals(t *testing.T) {
 	if len(r.Rows) != 1 || string(r.Rows[0][1].Bytes) != "\xff\x00" {
 		t.Fatalf("rows = %+v", r.Rows)
 	}
-	for _, q := range []string{`select * from ""`, `select * from "open`, `select X'f' from t`, `select X'zz' from t`, `insert into "my posts" values (2, 'b', timestamp 'nope', X'')`} {
+	for _, q := range []string{
+		`select * from ""`, `select * from "open`, `select X'f' from t`, `select X'zz' from t`,
+		`insert into "my posts" values (2, 'b', timestamp 'nope', X'')`,
+		// Names go into the JSON catalog: they must be UTF-8 without control characters.
+		"create table \"a\xffb\" (id int64 primary key)", "create table t (\"c\x00\" int64 primary key)",
+		"alter table \"my posts\" rename to \"tab\there\"",
+	} {
 		if _, err := Execute(db, q); !errors.Is(err, ErrParse) {
 			t.Errorf("%s: %v, want a parse error", q, err)
 		}

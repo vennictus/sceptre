@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type tokenKind int
@@ -209,10 +210,14 @@ func lexQuotedIdent(input string, start int) (string, int, error) {
 			i++
 			continue
 		}
-		if out.Len() == 0 {
+		name := out.String()
+		if name == "" {
 			return "", 0, fmt.Errorf("%w: empty quoted identifier", ErrParse)
 		}
-		return out.String(), i + 1, nil
+		if !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+			return "", 0, fmt.Errorf("%w: a quoted identifier must be UTF-8 without control characters", ErrParse)
+		}
+		return name, i + 1, nil
 	}
 	return "", 0, fmt.Errorf("%w: unterminated quoted identifier", ErrParse)
 }
