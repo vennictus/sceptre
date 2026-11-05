@@ -249,7 +249,7 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 		}
 	}
 	if stmt.OnConflict != nil {
-		if records, err = insertWithConflicts(db, def, stmt.OnConflict, target, records); err != nil {
+		if records, err = insertWithConflicts(db, def, stmt.OnConflict, target, checks, records); err != nil {
 			return Result{}, err
 		}
 	} else if err := db.InsertMany(stmt.Table, records); err != nil {

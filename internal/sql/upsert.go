@@ -113,11 +113,7 @@ func validateConflictSet(def table.TableDef, set []Assignment) error {
 // insertWithConflicts writes rows one at a time so each sees the ones before
 // it, skipping or updating rows that hit the conflict target. It returns the
 // rows written, inserted or updated.
-func insertWithConflicts(db *table.DB, def table.TableDef, oc *OnConflict, target conflictTarget, records []table.Record) ([]table.Record, error) {
-	checks, err := prepareChecks(def)
-	if err != nil {
-		return nil, err
-	}
+func insertWithConflicts(db *table.DB, def table.TableDef, oc *OnConflict, target conflictTarget, checks rowChecks, records []table.Record) ([]table.Record, error) {
 	var written []table.Record
 	for _, record := range records {
 		existing, conflict, err := findConflict(db, def, target, record.Values)
