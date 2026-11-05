@@ -154,3 +154,31 @@ func TestPredicateValidityIndependentOfIndexAndRows(t *testing.T) {
 		db.Close()
 	}
 }
+
+// A constant expression fails validation however deeply it is nested, so
+// the outcome never depends on whether the table has rows.
+func TestNestedConstantCastsFailWithoutRows(t *testing.T) {
+	t.Parallel()
+	for _, q := range []string{
+		"select id from t where CAST(CAST('2' AS int64) AS bool) = TRUE",
+		"select id from t where CAST(CAST(CAST(9007199254740993 AS text) AS int64) AS float64) = 1.5",
+		"select id from t where CAST(CAST('x' AS text) AS int64) = id",
+	} {
+		db := mustOpenSQLTable(t)
+		mustExec(t, db, "create table t (id int64 primary key)")
+		_, empty := Execute(db, q)
+		mustExec(t, db, "insert into t values (1)")
+		_, full := Execute(db, q)
+		db.Close()
+		if !errors.Is(empty, table.ErrInvalidValue) || !errors.Is(full, table.ErrInvalidValue) {
+			t.Errorf("%s: empty table %v, with a row %v; want an invalid-value error both times", q, empty, full)
+		}
+	}
+	db := mustOpenSQLTable(t)
+	defer db.Close()
+	mustExec(t, db, "create table t (id int64 primary key)")
+	mustExec(t, db, "insert into t values (1)")
+	if r := mustExec(t, db, "select id from t where CAST(CAST('1' AS int64) AS bool) = TRUE"); len(r.Rows) != 1 {
+		t.Fatalf("valid nested cast: %+v", r.Rows)
+	}
+}
