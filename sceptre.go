@@ -227,6 +227,8 @@ func (db *DB) Execute(ctx context.Context, input string, args ...Value) (Result,
 // ExecuteChecked is Execute with a last say over the result. When accept is
 // not nil it runs after the statement and before the automatic commit; if it
 // returns an error the statement is rolled back and that error is returned.
+// As for Tx.ExecuteChecked, a panic in accept also rolls the statement back,
+// and accept must not call the DB.
 // For a SELECT nothing is written, so accept only filters the result. Use it
 // to reject a result the caller cannot deliver (one too large to send, say)
 // while the statement can still be undone.
@@ -387,7 +389,10 @@ func (t *Tx) Execute(ctx context.Context, input string, args ...Value) (Result, 
 // ExecuteChecked is Execute with a last say over the result. When accept is
 // not nil it runs after the statement, while its writes can still be undone;
 // if it returns an error the statement's writes are rolled back, the
-// transaction stays usable, and that error is returned.
+// transaction stays usable, and that error is returned. A panic in accept
+// also rolls the statement back before it continues up the stack. accept runs
+// while the DB is held, so it must not call the DB, its transactions or its
+// sessions: that would deadlock.
 func (t *Tx) ExecuteChecked(ctx context.Context, accept func(Result) error, input string, args ...Value) (Result, error) {
 	t.db.mu.Lock()
 	defer t.db.mu.Unlock()
@@ -408,10 +413,18 @@ func (t *Tx) ExecuteChecked(ctx context.Context, accept func(Result) error, inpu
 	if err != nil {
 		return Result{}, executionError(err)
 	}
+	finished := false
+	defer func() {
+		if !finished { // a panic in the statement or in accept
+			_ = t.inner.RollbackTo(mark)
+			_ = t.inner.Release()
+		}
+	}()
 	r, err := sql.ExecuteStatement(t.tables, stmt)
 	if err == nil && accept != nil {
 		err = accept(r)
 	}
+	finished = true
 	if err != nil {
 		r = Result{}
 		if rbErr := t.inner.RollbackTo(mark); rbErr != nil {
