@@ -2,9 +2,9 @@
 
 What Sceptre's SQL accepts today, and what it does not. Every row here has
 tests. Keywords are case insensitive; identifiers match by spelling. A
-double-quoted identifier is always a name, never a keyword, and may hold any
-characters: `"select"`, `"my posts"`; write `""` for a quote inside one. One
-statement per call.
+double-quoted identifier is always a name, never a keyword, and may hold
+spaces and any UTF-8 text except control characters: `"select"`,
+`"my posts"`; write `""` for a quote inside one. One statement per call.
 
 ## Types
 
@@ -75,9 +75,9 @@ CHECK that is unknown passes. Unique indexes never treat two NULLs as equal.
 WHERE supports `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `AND`, `OR`,
 parentheses, `IS [NOT] NULL` and `CAST`. There is no `NOT`, arithmetic,
 `LIKE`, `IN` or functions yet (Phase 4). Every literal's conversion (a
-timestamp string, a constant CAST, text that must be UTF-8) is checked before
-any row is read, so whether a statement is valid never depends on the rows or
-on which index the planner picks. The same holds for INSERT: its conflict
+timestamp string, a constant CAST however deeply nested, text that must be
+UTF-8) is checked before any row is read, so whether a statement is valid
+never depends on the rows or on which index the planner picks. The same holds for INSERT: its conflict
 target, DO UPDATE assignments and RETURNING list are checked, and an empty
 `INSERT ... RETURNING` still returns its columns.
 

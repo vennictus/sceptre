@@ -59,7 +59,10 @@ sees the statement's result before it is kept: before the automatic commit, or
 while the transaction can still undo it. If `accept` returns an error the
 statement is rolled back and that error is returned. Use it when the caller may
 be unable to deliver a result, such as a `RETURNING` too large to send, so a
-write is never committed and then reported as failed.
+write is never committed and then reported as failed. A panic in `accept` also
+rolls the statement back before it continues. `accept` runs while the DB is
+held, so it must not call the DB, its transactions or its sessions: that would
+deadlock.
 
 **Commit ends the transaction on every outcome**, including canceled commit and
 definitely aborted storage errors. Start a new transaction if retry is appropriate.
