@@ -13,6 +13,10 @@ type expressionType struct {
 	boolean bool
 	lit     LiteralKind // set for literals, which take the other side's type
 	null    bool        // the NULL literal: compares with anything, never true
+	literal *Literal    // the literal itself, to check its conversion
+	// constant is the value of a CAST of constants, which is the same on
+	// every row, so a cast of it can be checked before any row is read.
+	constant *table.Value
 }
 
 // literalFits reports whether a literal of kind converts to a column type.
@@ -49,6 +53,23 @@ func comparable(left, right expressionType) bool {
 	return left.value == right.value
 }
 
+// literalConverts converts a compared literal as evaluation will, so an
+// invalid one ('not-a-time' against a timestamp, an inexact int against a
+// float) fails before any row is read, with or without an index.
+func literalConverts(left, right expressionType) error {
+	var err error
+	switch {
+	case left.null || right.null:
+	case left.literal != nil && right.literal != nil:
+		_, _, err = literalPair(*left.literal, *right.literal)
+	case left.literal != nil:
+		_, err = literalToValue(*left.literal, right.value)
+	case right.literal != nil:
+		_, err = literalToValue(*right.literal, left.value)
+	}
+	return err
+}
+
 func validateWhere(def table.TableDef, expr Expr) error {
 	if expr == nil {
 		return nil
@@ -82,7 +103,7 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 		case LiteralNull:
 			return expressionType{null: true, lit: LiteralNull}, nil
 		case LiteralInt, LiteralString, LiteralFloat, LiteralBool, LiteralTimestamp:
-			return expressionType{value: literalUntyped(*expr).Type, lit: expr.Kind}, nil
+			return expressionType{value: literalUntyped(*expr).Type, lit: expr.Kind, literal: expr}, nil
 		}
 	case *CastExpr:
 		if expr == nil {
@@ -99,7 +120,27 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 		if operand.boolean {
 			return expressionType{}, fmt.Errorf("%w: CAST needs a value", ErrExec)
 		}
-		return expressionType{value: to}, nil
+		// A CAST of a constant gives the same value on every row: compute it
+		// now, so a cast that fails, at any depth, fails before rows are read.
+		var v *table.Value
+		switch {
+		case operand.literal != nil && operand.literal.Kind == LiteralString:
+			text := table.TextValue(operand.literal.String)
+			v = &text
+		case operand.literal != nil:
+			lit := literalUntyped(*operand.literal)
+			v = &lit
+		case operand.constant != nil:
+			v = operand.constant
+		}
+		if v == nil {
+			return expressionType{value: to}, nil
+		}
+		out, err := castValue(*v, to)
+		if err != nil {
+			return expressionType{}, err
+		}
+		return expressionType{value: to, constant: &out}, nil
 	case *IsNullExpr:
 		if expr == nil {
 			break
@@ -135,6 +176,9 @@ func validateExpr(def table.TableDef, expr Expr) (expressionType, error) {
 			}
 			if !comparable(left, right) {
 				return expressionType{}, fmt.Errorf("%w: type mismatch", ErrExec)
+			}
+			if err := literalConverts(left, right); err != nil {
+				return expressionType{}, err
 			}
 		default:
 			return expressionType{}, fmt.Errorf("%w: unsupported operator %s", ErrExec, expr.Op)

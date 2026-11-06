@@ -31,6 +31,7 @@ func (tx *Tx) RollbackTo(mark int) error {
 	if tx.marks == 0 || mark < 0 || mark > len(tx.undo) {
 		return ErrNoSavepoint
 	}
+	tx.freezeCursors()
 	for i := len(tx.undo) - 1; i >= mark; i-- {
 		u := tx.undo[i]
 		if u.existed {
@@ -41,6 +42,7 @@ func (tx *Tx) RollbackTo(mark int) error {
 		delete(tx.pending, u.key)
 		delete(tx.writes, u.key)
 		tx.order = tx.order[:len(tx.order)-1]
+		tx.index.remove(u.key)
 	}
 	clear(tx.undo[mark:])
 	tx.undo = tx.undo[:mark]

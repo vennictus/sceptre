@@ -273,3 +273,22 @@ the median of three 2-second runs.
 
 Normal durability is about 1.8 times the commit throughput here. Commit latency
 is dominated by sync cost, so the ratio depends on the filesystem and device.
+
+## Staged upsert with a unique index: 2026-11-05
+
+`go test -run '^$' -bench StagedUpsertUnique .` (in the repository root) stages
+one multi-row `INSERT ... ON CONFLICT (id) DO NOTHING` into `t(id int64 PRIMARY
+KEY, v int64 UNIQUE)` inside a transaction, then rolls it back. Each row checks
+the unique index through the transaction's pending writes. Values are the median
+of three 2-second runs on the WSL2 machine above with Go 1.22.2.
+
+| Rows | Before (`325f358`) | After | Speedup |
+| ---: | ---: | ---: | ---: |
+| 200 | 7.97 ms | 2.24 ms | 3.6x |
+| 800 | 114.5 ms | 9.42 ms | 12x |
+| 3,200 | 1,878 ms | 39.3 ms | 48x |
+
+Before, every scan of the transaction copied and sorted all its pending writes,
+so the statement's cost grew with the square of its rows. Pending keys are now
+kept sorted as they are written and scans read them in place, so cost grows
+with the row count: 4 times the rows takes about 4.2 times as long.

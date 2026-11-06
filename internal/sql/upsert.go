@@ -19,6 +19,11 @@ func resolveConflictTarget(def table.TableDef, oc *OnConflict) (conflictTarget, 
 	if oc.Columns == nil {
 		return conflictTarget{any: true}, nil
 	}
+	for i, c := range oc.Columns {
+		if slices.Contains(oc.Columns[:i], c) {
+			return conflictTarget{}, fmt.Errorf("%w: ON CONFLICT names column %s twice", ErrExec, c)
+		}
+	}
 	sameSet := func(a, b []string) bool {
 		if len(a) != len(b) {
 			return false
@@ -108,14 +113,7 @@ func validateConflictSet(def table.TableDef, set []Assignment) error {
 // insertWithConflicts writes rows one at a time so each sees the ones before
 // it, skipping or updating rows that hit the conflict target. It returns the
 // rows written, inserted or updated.
-func insertWithConflicts(db *table.DB, def table.TableDef, oc *OnConflict, records []table.Record) ([]table.Record, error) {
-	target, err := resolveConflictTarget(def, oc)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateConflictSet(def, oc.Set); err != nil {
-		return nil, err
-	}
+func insertWithConflicts(db *table.DB, def table.TableDef, oc *OnConflict, target conflictTarget, checks rowChecks, records []table.Record) ([]table.Record, error) {
 	var written []table.Record
 	for _, record := range records {
 		existing, conflict, err := findConflict(db, def, target, record.Values)
@@ -145,7 +143,7 @@ func insertWithConflicts(db *table.DB, def table.TableDef, oc *OnConflict, recor
 			}
 			updated.Values[a.Column] = v
 		}
-		if err := checkRow(def, updated); err != nil {
+		if err := checks.check(updated); err != nil {
 			return nil, err
 		}
 		if err := db.Update(def.Name, updated); err != nil {

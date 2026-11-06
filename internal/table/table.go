@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/vennictus/sceptre/internal/kv"
@@ -731,9 +732,27 @@ func decodeTableDef(data []byte) (TableDef, error) {
 	return def, nil
 }
 
+// validName reports whether name can be a table, column or index name: not
+// empty, valid UTF-8 (the catalog is JSON, which would replace other bytes and
+// lose the name), and without control characters.
+func validName(name string) bool {
+	if name == "" || !utf8.ValidString(name) {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func validateTableDef(def TableDef, requirePrefix bool) error {
-	if def.Name == "" || len(def.Columns) == 0 || len(def.PrimaryKey) == 0 {
+	if len(def.Columns) == 0 || len(def.PrimaryKey) == 0 {
 		return ErrInvalidTableDef
+	}
+	if !validName(def.Name) {
+		return fmt.Errorf("%w: invalid table name %q", ErrInvalidTableDef, def.Name)
 	}
 	if requirePrefix && def.Prefix == 0 {
 		return ErrInvalidTableDef
@@ -744,7 +763,10 @@ func validateTableDef(def TableDef, requirePrefix bool) error {
 
 	columns := make(map[string]Type, len(def.Columns))
 	for _, column := range def.Columns {
-		if column.Name == "" || !validType(column.Type) {
+		if !validName(column.Name) {
+			return fmt.Errorf("%w: invalid column name %q", ErrInvalidTableDef, column.Name)
+		}
+		if !validType(column.Type) {
 			return ErrInvalidTableDef
 		}
 		if column.Nullable && (!def.tagged() || isPrimaryKey(def, column.Name)) {
@@ -810,8 +832,11 @@ func validateIndexDefs(def TableDef, columns map[string]Type, requirePrefix bool
 }
 
 func validateIndexDef(index IndexDef, columns map[string]Type, requirePrefix bool) error {
-	if index.Name == "" || len(index.Columns) == 0 {
+	if len(index.Columns) == 0 {
 		return ErrInvalidIndexDef
+	}
+	if !validName(index.Name) {
+		return fmt.Errorf("%w: invalid index name %q", ErrInvalidIndexDef, index.Name)
 	}
 	if requirePrefix && index.Prefix == 0 {
 		return ErrInvalidIndexDef

@@ -27,8 +27,26 @@ func Execute(db *table.DB, input string) (Result, error) {
 	return ExecuteStatement(db, stmt)
 }
 
-// ExecuteStatement runs a parsed statement against db.
+// ExecuteStatement runs a parsed statement against db. A statement that
+// writes is atomic: on a DB over a raw KV store its writes commit once,
+// together, and a failure leaves none of them behind.
 func ExecuteStatement(db *table.DB, stmt Statement) (Result, error) {
+	if _, ok := stmt.(*SelectStmt); ok || IsTransactionControl(stmt) {
+		return executeStatement(db, stmt)
+	}
+	var result Result
+	err := db.Atomic(func(db *table.DB) error {
+		r, err := executeStatement(db, stmt)
+		result = r
+		return err
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func executeStatement(db *table.DB, stmt Statement) (Result, error) {
 	switch stmt := stmt.(type) {
 	case *CreateTableStmt:
 		return executeCreateTable(db, stmt)
@@ -190,8 +208,18 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	empty := Result{}
 	if stmt.Returning != nil {
-		if _, err := returningResult(def, stmt.Returning, nil); err != nil {
+		if empty, err = returningResult(def, stmt.Returning, nil); err != nil {
+			return Result{}, err
+		}
+	}
+	var target conflictTarget
+	if stmt.OnConflict != nil {
+		if target, err = resolveConflictTarget(def, stmt.OnConflict); err != nil {
+			return Result{}, err
+		}
+		if err := validateConflictSet(def, stmt.OnConflict.Set); err != nil {
 			return Result{}, err
 		}
 	}
@@ -200,9 +228,13 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 		return Result{}, err
 	}
 	if len(rows) == 0 {
-		return Result{}, nil
+		return empty, nil
 	}
 	if err := fillAutoIncrement(db, def, rows); err != nil {
+		return Result{}, err
+	}
+	checks, err := prepareChecks(def)
+	if err != nil {
 		return Result{}, err
 	}
 	now := time.Now()
@@ -212,12 +244,12 @@ func executeInsert(db *table.DB, stmt *InsertStmt) (Result, error) {
 			return Result{}, err
 		}
 		records[i] = table.NewRecord(values)
-		if err := checkRow(def, records[i]); err != nil {
+		if err := checks.check(records[i]); err != nil {
 			return Result{}, err
 		}
 	}
 	if stmt.OnConflict != nil {
-		if records, err = insertWithConflicts(db, def, stmt.OnConflict, records); err != nil {
+		if records, err = insertWithConflicts(db, def, stmt.OnConflict, target, checks, records); err != nil {
 			return Result{}, err
 		}
 	} else if err := db.InsertMany(stmt.Table, records); err != nil {
@@ -258,16 +290,44 @@ func insertColumns(def table.TableDef, names []string) ([]table.Column, error) {
 	return out, nil
 }
 
+// checkSelectFits checks, from the schemas alone, that a SELECT's columns
+// can fill the INSERT columns by position: same type, or int64 into
+// float64. A mismatch fails even when the SELECT has no rows.
+func checkSelectFits(db *table.DB, sel *SelectStmt, columns []table.Column) error {
+	src, ok, err := db.Table(sel.Table)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return table.ErrTableNotFound
+	}
+	names, err := selectColumns(src, sel)
+	if err != nil {
+		return err
+	}
+	if len(names) != len(columns) {
+		return fmt.Errorf("%w: SELECT returns %d columns for %d", ErrExec, len(names), len(columns))
+	}
+	for i, name := range names {
+		from, _ := columnType(src, name)
+		to := columns[i].Type
+		if from != to && !(from == table.TypeInt64 && to == table.TypeFloat64) {
+			return fmt.Errorf("%w: SELECT column %d (%s) is %s, %s is %s", ErrExec, i+1, name, from, columns[i].Name, to)
+		}
+	}
+	return nil
+}
+
 // insertRows builds the value maps an INSERT writes, from VALUES literals or
 // from the rows of its SELECT, matched to columns by position.
 func insertRows(db *table.DB, def table.TableDef, columns []table.Column, stmt *InsertStmt) ([]map[string]table.Value, error) {
 	if stmt.Select != nil {
+		if err := checkSelectFits(db, stmt.Select, columns); err != nil {
+			return nil, err
+		}
 		res, err := executeSelect(db, stmt.Select)
 		if err != nil {
 			return nil, err
-		}
-		if len(res.Columns) != len(columns) {
-			return nil, fmt.Errorf("%w: SELECT returns %d columns for %d", ErrExec, len(res.Columns), len(columns))
 		}
 		rows := make([]map[string]table.Value, len(res.Rows))
 		for i, src := range res.Rows {
@@ -276,7 +336,11 @@ func insertRows(db *table.DB, def table.TableDef, columns []table.Column, stmt *
 				v := src[j]
 				if !v.IsNull() && v.Type != c.Type {
 					if v.Type == table.TypeInt64 && c.Type == table.TypeFloat64 {
-						v = table.Float64Value(float64(v.I64))
+						f, err := exactFloat(v.I64)
+						if err != nil {
+							return nil, err
+						}
+						v = table.Float64Value(f)
 					} else {
 						return nil, fmt.Errorf("%w: SELECT column %d is %s, %s is %s", ErrExec, j+1, v.Type, c.Name, c.Type)
 					}
@@ -376,13 +440,17 @@ func executeUpdate(db *table.DB, stmt *UpdateStmt) (Result, error) {
 		}
 	}
 
+	checks, err := prepareChecks(def)
+	if err != nil {
+		return Result{}, err
+	}
 	updates := make([]table.Record, 0, len(matchesRows))
 	for _, row := range matchesRows {
 		updated := table.NewRecord(row.Values)
 		for column, value := range assignments {
 			updated.Values[column] = value
 		}
-		if err := checkRow(def, updated); err != nil {
+		if err := checks.check(updated); err != nil {
 			return Result{}, err
 		}
 		updates = append(updates, updated)
@@ -526,16 +594,20 @@ func evalExpr(expr Expr, row table.Record) (evalResult, error) {
 		if left.value.IsNull() || right.value.IsNull() {
 			return evalResult{unknown: true, isBool: true}, nil
 		}
-		// A literal takes the type of the value it is compared with.
-		if lit, ok := expr.Left.(*Literal); ok {
-			if left.value, err = literalToValue(*lit, right.value.Type); err != nil {
-				return evalResult{}, err
-			}
+		// A literal takes the type of the value it is compared with; two
+		// literals take a common type.
+		leftLit, leftIsLit := expr.Left.(*Literal)
+		rightLit, rightIsLit := expr.Right.(*Literal)
+		switch {
+		case leftIsLit && rightIsLit:
+			left.value, right.value, err = literalPair(*leftLit, *rightLit)
+		case leftIsLit:
+			left.value, err = literalToValue(*leftLit, right.value.Type)
+		case rightIsLit:
+			right.value, err = literalToValue(*rightLit, left.value.Type)
 		}
-		if lit, ok := expr.Right.(*Literal); ok {
-			if right.value, err = literalToValue(*lit, left.value.Type); err != nil {
-				return evalResult{}, err
-			}
+		if err != nil {
+			return evalResult{}, err
 		}
 		result, err := compareValues(left.value, right.value, expr.Op)
 		if err != nil {
@@ -600,6 +672,32 @@ func compareValues(left, right table.Value, op string) (bool, error) {
 	}
 }
 
+// exactFloat converts an int64 to the float64 with the same value, or fails:
+// above 2^53 not every integer has one, and silently rounding would change
+// the number (9007199254740993 would become ...992).
+func exactFloat(n int64) (float64, error) {
+	f := float64(n)
+	if f == 0x1p63 || int64(f) != n {
+		return 0, fmt.Errorf("%w: int64 %d has no exact float64", table.ErrInvalidValue, n)
+	}
+	return f, nil
+}
+
+// literalPair gives two compared literals one type: an int64 and a float64
+// compare as float64 whichever side each is on; otherwise both keep their
+// own type, which validation has already found comparable.
+func literalPair(a, b Literal) (table.Value, table.Value, error) {
+	av, bv := literalUntyped(a), literalUntyped(b)
+	var err error
+	switch {
+	case a.Kind == LiteralInt && b.Kind == LiteralFloat:
+		av, err = literalToValue(a, table.TypeFloat64)
+	case a.Kind == LiteralFloat && b.Kind == LiteralInt:
+		bv, err = literalToValue(b, table.TypeFloat64)
+	}
+	return av, bv, err
+}
+
 func literalUntyped(literal Literal) table.Value {
 	switch literal.Kind {
 	case LiteralInt:
@@ -649,7 +747,11 @@ func literalToValue(literal Literal, valueType table.Type) (table.Value, error) 
 		case LiteralFloat:
 			return table.Float64Value(literal.Float), nil
 		case LiteralInt:
-			return table.Float64Value(float64(literal.Int)), nil
+			f, err := exactFloat(literal.Int)
+			if err != nil {
+				return table.Value{}, err
+			}
+			return table.Float64Value(f), nil
 		}
 		return table.Value{}, fmt.Errorf("%w: expected float64 literal", ErrExec)
 	case table.TypeBool:

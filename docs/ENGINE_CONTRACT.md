@@ -80,11 +80,14 @@ transaction (SELECT through `DB.Execute`, `DB.Tables`, `DB.Explain`, and
 pending changes. Failed statements leave
 prior successful work intact and the transaction usable. Public Commit ends it
 on every outcome; Close aborts open work. See [API.md](API.md) for lifecycle,
-cancellation, and outcome handling. CLI statements still commit independently.
+cancellation, and outcome handling. CLI and shell statements each commit on
+their own, and each is atomic: one commit per statement.
 
 `tx.Begin` takes a storage snapshot, an O(1) operation that copies nothing, and
 buffers writes. Reads consult the buffer, then the snapshot; scans merge the
-sorted buffer over a snapshot cursor. Statement validation checks key and value
+sorted buffer over a snapshot cursor. The buffer keeps its keys sorted as they
+are written, so opening a scan does not copy or sort it; a scan still sees the
+buffer as of when it was opened. Statement validation checks key and value
 sizes before buffering any mutation of the statement. Commit applies the buffer
 in one write transaction. `tx.Begin` has no managed conflict detection.
 `tx.Manager` adds conflict checks for point reads and writes against later
@@ -133,14 +136,16 @@ never treat NULLs as equal. Tables created before NULL support use the previous
 row encoding (format 0) and reject NULL until a column is added, which rewrites
 them in the current one (format 1). DROP COLUMN rewrites every row; other
 schema changes touch only the catalog and, for drops, the removed keys. CHECK
-expressions are stored as SQL text and enforced by the SQL layer, not by the
-internal table API.
+expressions are stored as SQL text in a lossless form (quoted names, `X'..'`
+for bytes that are not UTF-8, typed timestamps) and enforced by the SQL layer,
+not by the internal table API.
 
-Through the public API each statement is atomic: it runs under an internal
-savepoint, so a failure leaves none of its writes. The public API supports
-positional typed `?` bindings in literal positions, with exact binding counts
-and no SQL text interpolation. CLI parameter input is not implemented, and raw
-internal SQL (the CLI) commits each internal step separately.
+Every writing statement is atomic. Through the public API it runs under an
+internal savepoint; over a raw store (the CLI and shell) its writes are
+buffered and committed once. Either way a failure leaves none of its writes.
+The public API supports positional typed `?` bindings in literal positions,
+with exact binding counts and no SQL text interpolation. CLI parameter input is
+not implemented.
 
 Columns, predicate types, assignments, projections, and pagination bounds are
 checked even for empty tables or no-match access paths. LIMIT 0 is valid. Natural

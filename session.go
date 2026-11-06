@@ -37,13 +37,20 @@ func (s *Session) InTransaction() bool {
 // Error.Code for committed and uncertain outcomes. The transaction ends on
 // every COMMIT outcome.
 func (s *Session) Execute(ctx context.Context, input string, args ...Value) (Result, error) {
+	return s.ExecuteChecked(ctx, nil, input, args...)
+}
+
+// ExecuteChecked is Execute with a last say over a statement's result, as
+// for DB.ExecuteChecked and Tx.ExecuteChecked: an error from accept undoes
+// the statement. Transaction control statements do not call accept.
+func (s *Session) ExecuteChecked(ctx context.Context, accept func(Result) error, input string, args ...Value) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if kindOf(input, args) != kindControl {
 		if s.tx != nil {
-			return s.tx.Execute(ctx, input, args...)
+			return s.tx.ExecuteChecked(ctx, accept, input, args...)
 		}
-		return s.db.Execute(ctx, input, args...)
+		return s.db.ExecuteChecked(ctx, accept, input, args...)
 	}
 	stmt, err := s.db.statement(input, args)
 	if err != nil {

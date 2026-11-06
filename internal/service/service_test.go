@@ -22,12 +22,12 @@ const (
 )
 
 type fixture struct {
-	t  *testing.T
+	t  testing.TB
 	db *sceptre.DB
 	h  *Handler
 }
 
-func newFixture(t *testing.T, opts Options) *fixture {
+func newFixture(t testing.TB, opts Options) *fixture {
 	t.Helper()
 	db, err := sceptre.Open(filepath.Join(t.TempDir(), "db"), sceptre.Options{})
 	if err != nil {

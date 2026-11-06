@@ -1,2 +1,5 @@
+# Keep text files LF in every checkout so gofmt agrees on all platforms.
+* text=auto eol=lf
+
 # Test fixture databases are byte-exact; never convert line endings.
 *.db binary
