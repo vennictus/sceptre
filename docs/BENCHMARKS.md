@@ -292,3 +292,19 @@ Before, every scan of the transaction copied and sorted all its pending writes,
 so the statement's cost grew with the square of its rows. Pending keys are now
 kept sorted as they are written and scans read them in place, so cost grows
 with the row count: 4 times the rows takes about 4.2 times as long.
+
+## Large service responses: 2026-11-06
+
+`go test -run '^$' -bench LargeResults ./internal/service` serves 1,000 rows of
+1 KB text through the HTTP handler: a `SELECT *`, and an `UPDATE ... RETURNING *`
+in a transaction, whose result is sized before the update is kept. Values are
+the median of three 1-second runs on the WSL2 machine above with Go 1.22.2.
+
+| Path | Before (`5ab3cf4`) | After (`b18f629`) |
+| --- | ---: | ---: |
+| SELECT | 5.46 ms | 5.52 ms |
+| UPDATE ... RETURNING in a transaction | 17.89 ms | 15.73 ms |
+
+Before, a write's result was encoded twice: once to check its size before
+commit, once to send it. Now it is encoded once and the bytes are reused in
+the response. Reads were already encoded once and are unchanged.
